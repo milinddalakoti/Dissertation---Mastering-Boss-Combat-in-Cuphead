@@ -34,6 +34,16 @@ cd PythonRL
 pip install -r REQUIREMENTS.txt
 ```
 
+### Important Setup Notes
+- **BepInEx Setup**: The `GameFiles/BepInEx/` folder contains the BepInEx framework with the CupheadRL plugin installed. This folder is included in the repository so you can set up the modded game quickly.
+- **Doorstop Files**: To enable the BepInEx modding framework, the following files in the `GameFiles/` root are also included:
+  - `.doorstop_version` – indicates the Doorstop version used.
+  - `doorstop_config.ini` – configuration that tells Doorstop how to load BepInEx.
+  - `winhttp.dll` – Doorstop shim DLL that hijacks the game’s import to load BepInEx.
+  These files are required for the plugin to load correctly and are small, non‑copyrighted support files.
+- **Ignored Files**: `changelog.txt` and `CupheadPluginDebug.txt` are ignored by git as they are not needed for the mod to function (changelog is informational, CupheadPluginDebug.txt is a log file).
+- **Steam Issue Fix**: If you encounter issues with Steam interfering when running the scripts, you may need to create a `steam_appid.txt` file in the game's root directory (next to `Cuphead.exe`) containing the number `222750` (Cuphead's Steam App ID). This file is NOT included in the repository to avoid potential conflicts, but you can create it locally if needed.
+
 ### 2. Testing Input Control
 ```bash
 cd PythonRL

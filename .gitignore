@@ -1,5 +1,17 @@
-# Game files - DO NOT UPLOAD (copyrighted material)
-GameFiles/
+# Game files - DO NOT UPLOAD copyrighted game data, but allow BepInEx mod folder + required Doorstop files
+GameFiles/*
+!GameFiles/BepInEx/
+!GameFiles/.doorstop_version
+!GameFiles/doorstop_config.ini
+!GameFiles/winhttp.dll
+# Ignore logs and cache inside BepInEx
+GameFiles/BepInEx/cache/
+GameFiles/BepInEx/*.log
+GameFiles/BepInEx/*/*.log
+GameFiles/BepInEx/*/*/*.log
+# Ignore non-essential files in GameFiles root
+GameFiles/changelog.txt
+GameFiles/CupheadPluginDebug.txt
 
 # Claude Code settings (local to user)
 .claude/
@@ -12,6 +24,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
+*.cache
 
 # IDE and editor files
 .vscode/
@@ -53,6 +66,9 @@ CupheadPlugin/obj/
 
 # Log files (can be large)
 cuphead_debug.log
+
+# Documentation build artifacts
+_build/
 
 # Test recordings (can be large)
 test_recordings/

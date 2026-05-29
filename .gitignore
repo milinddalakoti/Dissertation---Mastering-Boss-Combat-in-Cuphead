@@ -74,6 +74,9 @@ _build/
 test_recordings/
 *.csv
 
+# Test scripts (for local testing, not needed in repo)
+PythonRL/test_*.py
+
 # Local settings
 *.log
 

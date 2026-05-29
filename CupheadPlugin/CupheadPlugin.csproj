@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net35</TargetFramework>
+		<AssemblyName>CupheadPlugin</AssemblyName>
+		<Product>My first plugin</Product>
+		<Version>1.0.0</Version>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<LangVersion>latest</LangVersion>
+		<RestoreAdditionalProjectSources>
+			https://api.nuget.org/v3/index.json;
+			https://nuget.bepinex.dev/v3/index.json;
+			https://nuget.samboy.dev/v3/index.json
+		</RestoreAdditionalProjectSources>
+		<RootNamespace>CupheadPlugin</RootNamespace>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all" />
+		<PackageReference Include="BepInEx.Core" Version="5.*" />
+		<PackageReference Include="BepInEx.PluginInfoProps" Version="2.*" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Include="Assembly-CSharp">
+			<HintPath>lib\Assembly-CSharp.dll</HintPath>
+		</Reference>
+		<Reference Include="Blender">
+			<HintPath>lib\Blender.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>lib\UnityEngine.CoreModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine">
+			<HintPath>..\GameFiles\Cuphead_Data\Managed\UnityEngine.dll</HintPath>
+		</Reference>
+
+	</ItemGroup>
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
+		<Exec Command="xcopy /Y &quot;$(TargetDir)$(AssemblyName).dll&quot; &quot;$(MSBuildProjectDirectory)\..\GameFiles\BepInEx\plugins\CupheadPlugin\&quot;" />
+	</Target>
+
+
+
+
+
+</Project>

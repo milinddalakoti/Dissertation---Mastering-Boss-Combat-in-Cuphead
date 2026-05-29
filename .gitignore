@@ -1,0 +1,66 @@
+# Game files - DO NOT UPLOAD (copyrighted material)
+GameFiles/
+
+# Claude Code settings (local to user)
+.claude/
+
+# Build artifacts
+bin/
+obj/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.sln
+*.csproj.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Python specific
+.env
+.venv
+env/
+venv/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.hypothesis/
+.pytest_cache/
+
+# Cuphead plugin specific
+CupheadPlugin/bin/
+CupheadPlugin/obj/
+
+# Log files (can be large)
+cuphead_debug.log
+
+# Test recordings (can be large)
+test_recordings/
+*.csv
+
+# Local settings
+*.log
+
+# OS
+Desktop.ini
+Thumbs.db

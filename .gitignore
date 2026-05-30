@@ -1,22 +1,20 @@
-# Game files - DO NOT UPLOAD copyrighted game data, but allow BepInEx mod folder + required Doorstop files
-GameFiles/*
+# Game files – keep only the tiny Doorstop/BepInEx config and the built plugin/DLLs for ease of use
+GameFiles/
 !GameFiles/BepInEx/
+!GameFiles/BepInEx/config/
+!GameFiles/BepInEx/plugins/
+!GameFiles/BepInEx/core/
 !GameFiles/.doorstop_version
 !GameFiles/doorstop_config.ini
 !GameFiles/winhttp.dll
-# Ignore logs and cache inside BepInEx
-GameFiles/BepInEx/cache/
-GameFiles/BepInEx/*.log
-GameFiles/BepInEx/*/*.log
-GameFiles/BepInEx/*/*/*.log
-# Ignore non-essential files in GameFiles root
+# Ignore non-essential files in the GameFiles root
 GameFiles/changelog.txt
 GameFiles/CupheadPluginDebug.txt
 
 # Claude Code settings (local to user)
 .claude/
 
-# Build artifacts
+# Build artifacts – we keep the built plugin DLLs under BepInEx, but ignore local build outputs
 bin/
 obj/
 __pycache__/
@@ -60,26 +58,23 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
-# Cuphead plugin specific
-CupheadPlugin/bin/
-CupheadPlugin/obj/
+# Cuphead plugin specific – we track the source and project file, but ignore the local lib copies (user should copy from their own install)
+CupheadPlugin/lib/
 
-# Log files (can be large)
+# Logs (can be large)
 cuphead_debug.log
 
 # Documentation build artifacts
 _build/
 
-# Test recordings (can be large)
-test_recordings/
-*.csv
+# Test recordings – we want to keep these for agent training logs
+# (if you ever want to ignore them, uncomment the next line)
+# test_recordings/
+# *.csv
 
-# Test scripts (for local testing, not needed in repo)
-PythonRL/test_*.py
-
-# Local settings
-*.log
+# Local test scripts – keep for development, but not required for end users
+# (if you want to ignore them, uncomment the next line)
+# PythonRL/test_*.py
 
 # OS
 Desktop.ini
-Thumbs.db

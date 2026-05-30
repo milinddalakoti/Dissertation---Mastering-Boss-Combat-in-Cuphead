@@ -41,6 +41,12 @@ pip install -r REQUIREMENTS.txt
   - `doorstop_config.ini` – configuration that tells Doorstop how to load BepInEx.
   - `winhttp.dll` – Doorstop shim DLL that hijacks the game’s import to load BepInEx.
   These files are required for the plugin to load correctly and are small, non‑copyrighted support files.
+- **Unity DLLs**: The `CupheadPlugin/lib/` folder is intentionally empty in the repository. After cloning, you must copy the following DLLs from your own Cuphead installation (typically `<SteamLibrary>\steamapps\common\Cuphead\Cuphead_Data\Managed\`) into `CupheadPlugin\lib\`:
+  - `Assembly-CSharp.dll`
+  - `Blender.dll`
+  - `UnityEngine.CoreModule.dll`
+  - `UnityEngine.dll`
+  These files are large and copyrighted, so they are not included in the repository.
 - **Ignored Files**: `changelog.txt` and `CupheadPluginDebug.txt` are ignored by git as they are not needed for the mod to function (changelog is informational, CupheadPluginDebug.txt is a log file).
 - **Steam Issue Fix**: If you encounter issues with Steam interfering when running the scripts, you may need to create a `steam_appid.txt` file in the game's root directory (next to `Cuphead.exe`) containing the number `222750` (Cuphead's Steam App ID). This file is NOT included in the repository to avoid potential conflicts, but you can create it locally if needed.
 

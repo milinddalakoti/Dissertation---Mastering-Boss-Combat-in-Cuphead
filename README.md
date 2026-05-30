@@ -66,12 +66,6 @@ Follow the prompts to test keyboard inputs.
 3. In another terminal: Run your test inputs or RL agent code
 4. Monitor `cuphead_debug.log` for plugin status and state updates
 
-### 4. RL Agent Integration
-Use `environment_server.py` to:
-- Get state: `server.get_state()` → boss HP, phase, events
-- Send actions: `server.send_input("jump", 1.0)` → press Z key
-- Release actions: `server.send_input("jump", 0.0)` → release Z key
-
 ## 🎯 Current Status
 
 ✅ **State Extraction Verified**: From test logs, confirmed:
@@ -119,22 +113,6 @@ Python Server: environment_server.py
     └─ Sends input: server.send_input(action, value) → pynput → Game
 ```
 
-## 🚀 Next Steps
-
-1. **Install pynput**: `pip install -r REQUIREMENTS.txt`
-2. **Test inputs**: `python test_commands_pynput.py`
-3. **Verify end-to-end**: Launch game, run server, test inputs, observe movement
-4. **Implement RL agent**: Process state → select action → send inputs → repeat
-5. **Begin training**: Start PPO episodes to learn Goopy Le Grande fight patterns
-
-## 📖 Documentation
-
-- `FINAL_SUMMARY.md`: Complete technical summary
-- `INSTALL_AND_TEST.md`: Detailed installation and testing guide
-- `TESTING_GUIDE.md`: Original testing procedures
-- `IMPLEMENTATION_SUMMARY.md`: High-level implementation overview
-- Progress tracking: `.claude/projects/.../memory/progress_log.md`
-
 ## 💡 Notes
 
 - The C# plugin (`Plugin.cs`) is intentionally minimal - focused purely on reliable state extraction
@@ -143,5 +121,3 @@ Python Server: environment_server.py
 - Ready for PPO, DQN, or any other RL algorithm implementation
 
 ---
-*Ready for RL agent development and training!*
-*Last updated: 2026-05-25*

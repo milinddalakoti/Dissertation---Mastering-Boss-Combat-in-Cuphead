@@ -68,15 +68,10 @@ Follow the prompts to test keyboard inputs.
 - Player death events captured
 - All Harmony patches applied successfully
 
-✅ **Python-Led Architecture**: 
-- C# plugin reduced to essential state extraction only
-- Python handles decision-making and input control via pynput
-- Maximized your Python expertise as requested
+✅ **Restart on Boss death**: 
+- environment_server.py listen for death event 
+- initiates a restart command for easy replaybility
 
-✅ **Input Control Framework**: 
-- pynput integration for direct keyboard control
-- Mapped to standard Cuphead controls (Arrow keys, Z, X, C)
-- Proper press/release handling
 
 ##  Technical Details
 

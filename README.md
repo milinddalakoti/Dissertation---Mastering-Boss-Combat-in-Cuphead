@@ -3,7 +3,7 @@
 ## Project Overview
 This project implements a reinforcement learning framework to train an AI agent to master boss combat in Cuphead, with Goopy Le Grande (Slime boss) as the primary target. The architecture uses a Python-led approach for maximum accessibility and leverages your existing Python expertise.
 
-## 📁 File Structure
+## File Structure
 
 ```
 Dissertation/
@@ -14,19 +14,14 @@ Dissertation/
 ├── PythonRL/                          # Python RL components (main logic)
 │   ├── environment_server.py          # Main server: state reception + input control
 │   ├── test_commands_pynput.py        # Testing script for pynput input
-│   ├── test_commands.py               # Legacy TCP command tester (reference)
+│   ├── test_commands.py               
 │   └── REQUIREMENTS.txt               # pynput dependency (>=1.7.6)
-├── Planning documents/                # Reorganized planning references
-│   ├── implementation_plan.md
-│   ├── IMPLEMENTATION_SUMMARY.md
-│   ├── SUMMARY OF WHAT ALL I HAVE DONE.txt
-│   └── TESTING_GUIDE.md
 ├── PDD_Dalakoti_Milind_25230406.pdf   # Dissertation document
 ├── global.json                        # .NET configuration
 └── README.md                          # This file
 ```
 
-## 🔧 How to Use
+## Setup
 
 ### 1. Installation
 ```bash
@@ -35,7 +30,7 @@ pip install -r REQUIREMENTS.txt
 ```
 
 ### Important Setup Notes
-- **BepInEx Setup**: The `GameFiles/BepInEx/` folder contains the BepInEx framework with the CupheadRL plugin installed. This folder is included in the repository so you can set up the modded game quickly.
+- **BepInEx Setup**: The `GameFiles/BepInEx/` folder contains the BepInEx framework with the CupheadRL plugin installed. This folder is included in the repository for setting up the modded game quickly.
 - **Doorstop Files**: To enable the BepInEx modding framework, the following files in the `GameFiles/` root are also included:
   - `.doorstop_version` – indicates the Doorstop version used.
   - `doorstop_config.ini` – configuration that tells Doorstop how to load BepInEx.
@@ -50,7 +45,6 @@ pip install -r REQUIREMENTS.txt
     * `Blender.dll`  
   Place all four DLLs into `CupheadPlugin\lib\`.
   These files are large and copyrighted (except Blender.dll which is redistributable with the BepInEx plugin), so they are not included in the repository except for Blender.dll.
-- **Ignored Files**: `changelog.txt` and `CupheadPluginDebug.txt` are ignored by git as they are not needed for the mod to function (changelog is informational, CupheadPluginDebug.txt is a log file).
 - **Steam Issue Fix**: If you encounter issues with Steam interfering when running the scripts, you may need to create a `steam_appid.txt` file in the game's root directory (next to `Cuphead.exe`) containing the number `222750` (Cuphead's Steam App ID). This file is NOT included in the repository to avoid potential conflicts, but you can create it locally if needed.
 
 ### 2. Testing Input Control
@@ -66,7 +60,7 @@ Follow the prompts to test keyboard inputs.
 3. In another terminal: Run your test inputs or RL agent code
 4. Monitor `cuphead_debug.log` for plugin status and state updates
 
-## 🎯 Current Status
+## Current Working Mods
 
 ✅ **State Extraction Verified**: From test logs, confirmed:
 - Boss HP tracking working: `[BOSS HIT] Damage: 4.0 | HP: 1196.0/1200.0 (99.7%)`
@@ -117,7 +111,4 @@ Python Server: environment_server.py
 
 - The C# plugin (`Plugin.cs`) is intentionally minimal - focused purely on reliable state extraction
 - All complex logic (state processing, decision making, input control) resides in Python
-- This approach leverages your Python expertise while maintaining game compatibility
-- Ready for PPO, DQN, or any other RL algorithm implementation
-
 ---

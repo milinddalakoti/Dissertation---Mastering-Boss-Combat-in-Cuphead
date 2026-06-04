@@ -1,7 +1,7 @@
 # Cuphead RL Dissertation Project
 
 ## Project Overview
-This project implements a reinforcement learning framework to train an AI agent to master boss combat in Cuphead, with Goopy Le Grande (Slime boss) as the primary target. The architecture uses a Python-led approach for maximum accessibility and leverages your existing Python expertise.
+This project implements a reinforcement learning framework to train an AI agent to master boss combat in Cuphead, with Goopy Le Grande (Slime boss) as the primary target. The architecture uses a Python-led approach for maximum accessibility via a plugin based approach
 
 ## File Structure
 

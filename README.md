@@ -78,7 +78,7 @@ Follow the prompts to test keyboard inputs.
 - Mapped to standard Cuphead controls (Arrow keys, Z, X, C)
 - Proper press/release handling
 
-## 📊 Technical Details
+##  Technical Details
 
 ### State Extraction (C# Plugin → Python)
 - **Protocol**: TCP port 5000, JSON lines
@@ -107,7 +107,7 @@ Python Server: environment_server.py
     └─ Sends input: server.send_input(action, value) → pynput → Game
 ```
 
-## 💡 Notes
+## Notes
 
 - The C# plugin (`Plugin.cs`) is intentionally minimal - focused purely on reliable state extraction
 - All complex logic (state processing, decision making, input control) resides in Python

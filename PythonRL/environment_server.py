@@ -4,6 +4,7 @@ import threading
 import time
 import csv
 import os
+import random
 from pynput.keyboard import Key, Controller
 
 class CupheadEnvironmentServer:
@@ -22,6 +23,15 @@ class CupheadEnvironmentServer:
         self.csv_data = []
         self.csv_index = 0
         self.playback_start_time = 0
+
+        # Random boss functionality
+        self._random_active = False
+        self._random_lock = threading.Lock()
+        self._random_thread = None
+        self._state_received = False  # Track if we've seen genuine game state
+        self.action_interval = 0.3    # seconds between each action press/release
+        self.press_hold = 0.15        # how long to hold each key (seconds)
+        self.burst_duration = 8.0     # how long the random actions last after activation
 
     def start(self):
         self.server_socket.bind((self.host, self.port))
@@ -77,8 +87,68 @@ class CupheadEnvironmentServer:
 
             # Check for episode end to trigger automatic restart
             self._check_episode_end_and_restart(message)
+
+            # ---- NEW: Detect fight start/restart and manage random actions ----
+            event_type = message.get("event", "NO_EVENT")
+            print(f"[DEBUG] Processing message - Event: '{event_type}', Full message: {message}")
+
+            # Handle level loaded events (fight start or restart)
+            if event_type == "level_loaded":
+                print(f"[LEVEL LOADED] Level: {message.get('level', 'Unknown')}")
+                # Reset state to allow new burst on each level load/restart
+                self._state_received = False
+
+                # If we're not already active, start the delayed action loop
+                if not self._random_active:
+                    print(f"[FIGHT START DETECTED] Received level_loaded event – starting delayed random action burst. Message: {message}")
+                    with self._random_lock:
+                        if not self._random_active:
+                            self._random_active = True
+                            # Start the random action loop with a 3-second delay
+                            self._random_thread = threading.Thread(
+                                target=self._delayed_random_action_loop,
+                                args=(self.burst_duration,),
+                                daemon=True,
+                            )
+                            self._random_thread.start()
+                            print(f"[RANDOM THREAD] Random action thread started - THREAD ID: {self._random_thread.ident if self._random_thread else 'None'}")
+                else:
+                    print(f"[FIGHT RESTART] Level reloaded while actions were active – continuing current burst")
+
+            # Ignore our own connection confirmation message
+            elif event_type == "connected":
+                print(f"[DEBUG] Ignoring our own connection confirmation message")
+
+            # Handle any other genuine game state update as fallback
+            elif not self._state_received and event_type != "NO_EVENT" and event_type != "connected":
+                self._state_received = True
+                print(f"[FIGHT START DETECTED] Received game state update (event: '{event_type}') – starting delayed random action burst. Message: {message}")
+                with self._random_lock:
+                    if not self._random_active:
+                        self._random_active = True
+                        # Start the random action loop with a 3-second delay
+                        self._random_thread = threading.Thread(
+                            target=self._delayed_random_action_loop,
+                            args=(self.burst_duration,),
+                            daemon=True,
+                        )
+                        self._random_thread.start()
+                        print(f"[RANDOM THREAD] Random action thread started - THREAD ID: {self._random_thread.ident if self._random_thread else 'None'}")
+            else:
+                # Log what we're receiving for debugging
+                if event_type != "NO_EVENT":
+                    print(f"[DEBUG] Received event: {event_type} - waiting for fight start")
+                else:
+                    print(f"[DEBUG] Message has no event field: {message}")
+            # If a burst is already running we let it continue; when it ends,
+            # the next state update will start a new burst (keeps actions going
+            # throughout the fight).
         except json.JSONDecodeError:
             print(f"[!] Failed to parse JSON: {message_str}")
+        except Exception as e:
+            print(f"[!] Unexpected error in _process_message: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     def get_state(self):
         return self.latest_state
@@ -98,6 +168,12 @@ class CupheadEnvironmentServer:
             elif action == "move_right":
                 self.keyboard.press(Key.right)
                 print(f"[INPUT] Move Right")
+            elif action == "aim_up":
+                self.keyboard.press(Key.up)
+                print(f"[INPUT] Aim Up")
+            elif action == "duck_crouch":
+                self.keyboard.press(Key.down)
+                print(f"[INPUT] Duck/Crouch")
             elif action == "jump":
                 self.keyboard.press(KeyCode.from_char('z'))  # Z key for jump
                 print(f"[INPUT] Jump")
@@ -105,8 +181,11 @@ class CupheadEnvironmentServer:
                 self.keyboard.press(KeyCode.from_char('x'))  # X key for shoot
                 print(f"[INPUT] Shoot")
             elif action == "dash":
-                self.keyboard.press(KeyCode.from_char('c'))  # C key for dash
+                self.keyboard.press(Key.shift)  # Left Shift key for dash
                 print(f"[INPUT] Dash")
+            elif action == "directional_aim":
+                self.keyboard.press(KeyCode.from_char('c'))  # C key for directional aim
+                print(f"[INPUT] Directional Aim")
             else:
                 print(f"[INPUT WARN] Unknown action: {action}")
 
@@ -119,9 +198,12 @@ class CupheadEnvironmentServer:
             key_map = {
                 "move_left": Key.left,
                 "move_right": Key.right,
+                "aim_up": Key.up,
+                "duck_crouch": Key.down,
                 "jump": KeyCode.from_char('z'),
                 "shoot": KeyCode.from_char('x'),
-                "dash": KeyCode.from_char('c')
+                "dash": Key.shift,
+                "directional_aim": KeyCode.from_char('c')
             }
 
             if action in key_map:
@@ -139,20 +221,43 @@ class CupheadEnvironmentServer:
     def send_restart_command(self):
         """Send a restart command to the game via TCP on port 5001"""
         try:
-            if self.command_socket is None or not self.command_socket.fileno() >= 0:
+            if self.command_socket is None:
                 # Create a new connection for sending commands
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.command_socket.connect((self.host, 5001))  # Different port for commands
                 print(f"[+] Command socket connected to {self.host}:5001")
+            elif not self._is_socket_connected(self.command_socket):
+                # Socket exists but is not connected, recreate it
+                try:
+                    self.command_socket.close()
+                except:
+                    pass
+                self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.command_socket.connect((self.host, 5001))  # Different port for commands
+                print(f"[+] Command socket reconnected to {self.host}:5001")
 
             # Send command as JSON with newline delimiter
             command_json = json.dumps({"command": "restart_level"}) + "\n"
-            self.command_socket.send(command_json.encode('utf-8'))
-            print(f"[COMMAND SENT] Restart level command")
-            return True
+            sent = self.command_socket.send(command_json.encode('utf-8'))
+            if sent:
+                print(f"[COMMAND SENT] Restart level command ({sent} bytes)")
+                return True
+            else:
+                print(f"[-] Failed to send restart command: zero bytes sent")
+                self.command_socket = None
+                return False
         except Exception as e:
             print(f"[-] Failed to send restart command: {e}")
             self.command_socket = None
+            return False
+
+    def _is_socket_connected(self, sock):
+        """Check if socket is still connected"""
+        try:
+            # This will raise an exception if socket is not connected
+            sock.getpeername()
+            return True
+        except:
             return False
 
     def _check_episode_end_and_restart(self, message):
@@ -291,6 +396,65 @@ class CupheadEnvironmentServer:
             print(f"[PLAYBACK ERROR] Playback worker error: {e}")
         finally:
             self.playback_active = False
+
+    # RANDOM BOSS FUNCTIONALITY
+    def _delayed_random_action_loop(self, duration):
+        """
+        Waits 3 seconds for the fight to actually start, then runs the random action loop.
+        """
+        print("[RANDOM LOOP] Waiting 3 seconds for fight to start...")
+        time.sleep(3.0)  # Wait for fight to actually begin after level load
+
+        if not self.running:
+            return
+
+        print("[RANDOM LOOP] Starting random action loop after 3-second delay")
+        self._random_action_loop(duration)
+
+    # ------------------------------------------------------------------
+    # Random action loop – runs in its own daemon thread
+    # ------------------------------------------------------------------
+    def _random_action_loop(self, duration):
+        """
+        Repeatedly pick a random action, press it for `self.press_hold` seconds,
+        release, then wait the remainder of `self.action_interval` before the next.
+        Runs for `duration` seconds or until the server is stopped.
+        """
+        end_time = time.time() + duration
+        actions = ["move_left", "move_right", "jump", "shoot", "dash"]
+        action_count = 0
+
+        print(f"[RANDOM LOOP] Starting random action loop for {duration} seconds")
+
+        while time.time() < end_time and self.running:
+            action = random.choice(actions)
+            action_count += 1
+            # Press
+            print(f"[RANDOM LOOP] Action #{action_count}: Pressing {action}")
+            self.send_input(action, 1.0)
+            print(f"[RANDOM INPUT] Press {action}")
+            time.sleep(self.press_hold)
+            # Release
+            print(f"[RANDOM LOOP] Action #{action_count}: Releasing {action}")
+            self.send_input(action, 0.0)
+            print(f"[RANDOM INPUT] Release {action}")
+            # Wait the rest of the interval
+            time.sleep(max(0.0, self.action_interval - self.press_hold))
+
+        # Clean up flag
+        with self._random_lock:
+            self._random_active = False
+            print(f"[RANDOM ACTION] Burst finished after {action_count} actions.")
+
+    # ------------------------------------------------------------------
+    # Optional: expose a method to stop random actions early
+    # ------------------------------------------------------------------
+    def stop_random_actions(self):
+        """Force‑stop any ongoing random‑action burst."""
+        with self._random_lock:
+            if self._random_active:
+                self._random_active = False
+                print("[RANDOM ACTION] Stopped by user request.")
 
     def stop(self):
         self.running = False

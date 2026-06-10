@@ -1,7 +1,7 @@
 # Cuphead RL Dissertation Project
 
 ## Project Overview
-This project implements a reinforcement learning framework to train an AI agent to master boss combat in Cuphead, with Goopy Le Grande (Slime boss) as the primary target. The architecture uses a Python-led approach for maximum accessibility via a plugin based approach
+This project implements a reinforcement learning framework to train an AI agent to master boss combat in Cuphead, with Goopy Le Grande (Slime boss) as the primary target. The architecture uses a Python-led approach for maximum accessibility and flexibility via a plugin based approach
 
 ## File Structure
 
@@ -68,9 +68,15 @@ Follow the prompts to test keyboard inputs.
 - Player death events captured
 - All Harmony patches applied successfully
 
-✅ **Restart on Boss death**: 
-- environment_server.py listen for death event 
-- initiates a restart command for easy replaybility
+✅ **Restart on Boss/Player Death**: 
+- environment_server.py listens for death events 
+- initiates restart command for easy replayability
+
+✅ **Integrated Random Boss Testing**: 
+- Built-in random action generator for input path testing
+- 3-second delay before actions start (matches fight begin time)
+- Expanded action set including aim, duck/crouch, and directional controls
+- Automatic restart after level completion for continuous testing
 
 
 ##  Technical Details
@@ -87,9 +93,12 @@ Follow the prompts to test keyboard inputs.
 - **Mapping**:
   - `move_left` ←→ Left Arrow
   - `move_right` ←→ Right Arrow
+  - `aim_up` ←→ Up Arrow
+  - `duck_crouch` ←→ Down Arrow
   - `jump` ←→ Z key
   - `shoot` ←→ X key
-  - `dash` ←→ C key
+  - `dash` ←→ Left Shift
+  - `directional_aim` ←→ C key
 
 ### Architecture Flow
 ```
@@ -101,6 +110,13 @@ Python Server: environment_server.py
     ├─ RL Agent: Processes state → selects action
     └─ Sends input: server.send_input(action, value) → pynput → Game
 ```
+
+## 🆕 Latest Features Added
+- **Level Load Detection**: C# plugin now detects when boss levels load and sends `level_loaded` events
+- **Integrated Random Boss Testing**: Environment server includes built-in random action generator for testing input paths
+- **Expanded Action Set**: Now supports all Cuphead controls including aim up, duck/crouch, and directional aiming
+- **Smart Timing**: 3-second delay before actions start to match actual fight begin time
+- **Automatic Restart Integration**: Seamless restart after player/boss death with new action bursts
 
 ## Notes
 

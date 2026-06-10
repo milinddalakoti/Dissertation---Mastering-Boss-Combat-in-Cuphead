@@ -56,6 +56,57 @@ namespace CupheadPlugin
             TryPatch(harmony, AccessTools.TypeByName("PlayerStatsManager"), "TakeDamage", typeof(UniversalPlayerDamagePatch), "Postfix");
 
             WriteLog("Harmony Patching phase complete.");
+
+            // Try to patch Level.Awake for level loaded detection
+            TryPatchLevelAwake(harmony);
+        }
+
+        // Patch for detecting level awake (when level/scene loads)
+        private void TryPatchLevelAwake(Harmony harmony)
+        {
+            try
+            {
+                var original = AccessTools.Method(typeof(Level), "Awake");
+                if (original != null)
+                {
+                    var postfix = AccessTools.Method(typeof(LevelAwakePatch), "Postfix");
+                    harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+                    WriteLog("[OK] Patched Level.Awake");
+                }
+                else
+                {
+                    WriteLog("[WARN] Level.Awake method not found");
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"[ERROR] Failed to patch Level.Awake: {ex.Message}");
+            }
+        }
+
+        // Patch class for detecting when a level loads
+        public static class LevelAwakePatch
+        {
+            public static void Postfix(Level __instance)
+            {
+                // Send a state update indicating level has loaded
+                try
+                {
+                    string levelName = "Unknown";
+                    try
+                    {
+                        levelName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                    }
+                    catch { }
+
+                    Plugin.WriteLog($"[LEVEL LOADED] Level: {levelName}");
+                    Plugin.SendState($"{{\"event\": \"level_loaded\", \"level\": \"{levelName}\"}}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.WriteLog($"[LEVEL LOADED ERROR] Failed to send level loaded state: {ex.Message}");
+                }
+            }
         }
 
         private void OnApplicationQuit()

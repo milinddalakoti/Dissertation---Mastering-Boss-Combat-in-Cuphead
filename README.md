@@ -13,8 +13,6 @@ Dissertation/
 ├── GameFiles/                         # Cuphead game installation
 ├── PythonRL/                          # Python RL components (main logic)
 │   ├── environment_server.py          # Main server: state reception + input control
-│   ├── test_commands_pynput.py        # Testing script for pynput input
-│   ├── test_commands.py               
 │   └── REQUIREMENTS.txt               # pynput dependency (>=1.7.6)
 ├── PDD_Dalakoti_Milind_25230406.pdf   # Dissertation document
 ├── global.json                        # .NET configuration

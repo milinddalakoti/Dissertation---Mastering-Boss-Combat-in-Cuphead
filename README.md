@@ -76,6 +76,14 @@ Follow the prompts to test keyboard inputs.
 - Expanded action set including aim, duck/crouch, and directional controls
 - Automatic restart after level completion for continuous testing
 
+- ✅ **Position tracking for player and boss**: 
+- Added position and phase tracking for boss fights
+```{"event": "state_update", "boss_positions": [{"x": 369, "y": -247}], "boss_phase": "Main"```
+- Added position tracking for player
+```"player_positions": [{"player_id": 1, "is_dead": false, "x": -410, "y": -187.9969}, {"player_id": 2, "is_dead": true, "x": 0, "y": 0}]```
+
+
+
 
 ##  Technical Details
 
@@ -108,13 +116,6 @@ Python Server: environment_server.py
     ├─ RL Agent: Processes state → selects action
     └─ Sends input: server.send_input(action, value) → pynput → Game
 ```
-
-## 🆕 Latest Features Added
-- **Level Load Detection**: C# plugin now detects when boss levels load and sends `level_loaded` events
-- **Integrated Random Boss Testing**: Environment server includes built-in random action generator for testing input paths
-- **Expanded Action Set**: Now supports all Cuphead controls including aim up, duck/crouch, and directional aiming
-- **Smart Timing**: 3-second delay before actions start to match actual fight begin time
-- **Automatic Restart Integration**: Seamless restart after player/boss death with new action bursts
 
 ## Notes
 

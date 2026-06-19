@@ -3,10 +3,12 @@ GameFiles/
 !GameFiles/BepInEx/
 !GameFiles/BepInEx/config/
 !GameFiles/BepInEx/plugins/
+!GameFiles/BepInEx/plugins/CupheadPlugin/
 !GameFiles/BepInEx/core/
 !GameFiles/.doorstop_version
 !GameFiles/doorstop_config.ini
 !GameFiles/winhttp.dll
+!GameFiles/BepInEx/plugins/CupheadPlugin/CupheadPlugin.dll
 # Ignore non-essential files in the GameFiles root
 GameFiles/changelog.txt
 GameFiles/CupheadPluginDebug.txt

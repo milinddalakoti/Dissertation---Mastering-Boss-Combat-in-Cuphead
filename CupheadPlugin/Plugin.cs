@@ -1,7 +1,8 @@
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -59,6 +60,9 @@ namespace CupheadPlugin
 
             // Try to patch Level.Awake for level loaded detection
             TryPatchLevelAwake(harmony);
+
+            // Patch Level.Update for continuous state updates (boss/player positions, phases)
+            TryPatchLevelUpdate(harmony);
         }
 
         // Patch for detecting level awake (when level/scene loads)
@@ -81,6 +85,29 @@ namespace CupheadPlugin
             catch (Exception ex)
             {
                 WriteLog($"[ERROR] Failed to patch Level.Awake: {ex.Message}");
+            }
+        }
+
+        // Patch Level.Update for continuous state updates (boss/player positions, phases)
+        private void TryPatchLevelUpdate(Harmony harmony)
+        {
+            try
+            {
+                var original = AccessTools.Method(typeof(Level), "Update");
+                if (original != null)
+                {
+                    var postfix = AccessTools.Method(typeof(LevelUpdatePatch), "Postfix");
+                    harmony.Patch(original, postfix: new HarmonyMethod(postfix));
+                    WriteLog("[OK] Patched Level.Update for position tracking");
+                }
+                else
+                {
+                    WriteLog("[WARN] Level.Update method not found");
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"[ERROR] Failed to patch Level.Update: {ex.Message}");
             }
         }
 
@@ -365,7 +392,7 @@ namespace CupheadPlugin
             catch { }
 
             float currentHp = (__instance.timeline != null) ? __instance.timeline.health - __instance.timeline.damage : 0;
-            Plugin.WriteLog($"[PHASE CHANGE] → {phase} | HP: {currentHp:F1}");
+            Plugin.WriteLog($"[PHASE CHANGE] â†’ {phase} | HP: {currentHp:F1}");
             Plugin.SendState($"{{\"event\": \"phase_change\", \"phase\": \"{phase}\", \"hp\": {currentHp}}}");
         }
     }
@@ -415,6 +442,207 @@ namespace CupheadPlugin
         {
             Plugin.WriteLog("[WIDE NET] PlayerStatsManager.TakeDamage fired.");
             Plugin.SendState("{\"event\": \"wide_net_player_hit\"}");
+        }
+    }
+
+    // Patch for continuous state updates (boss position/phase, player position)
+    public static class LevelUpdatePatch
+    {
+        private const float STATE_SEND_INTERVAL = 0.1f;
+        private static float _lastStateSendTime = 0f;
+
+        public static void Postfix(Level __instance)
+        {
+            // Throttle updates to avoid network spam
+            if (Time.time - _lastStateSendTime < STATE_SEND_INTERVAL)
+            {
+                return;
+            }
+            _lastStateSendTime = Time.time;
+
+            try
+            {
+                var bossPositions = GetBossPositions(__instance);
+                var playerPositions = GetPlayerPositions();
+                float bossHp = GetBossHealth(__instance);
+                float bossHpPct = (bossHp > 0) ? (__instance.timeline.health - __instance.timeline.damage) / __instance.timeline.health * 100f : 0f;
+                string bossPhase = GetBossPhase(__instance);
+
+                Plugin.SendState($"{{\"event\": \"state_update\", \"boss_positions\": {JsonEncodePositions(bossPositions)}, \"boss_phase\": \"{bossPhase}\", \"player_positions\": {JsonEncodePlayerPositions(playerPositions)}, \"boss_hp\": {bossHp}, \"boss_hp_pct\": {bossHpPct:F1}, \"level_time\": {__instance.LevelTime:F2}}}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.WriteLog($"[UPDATE ERROR] Failed to send state update: {ex.Message}");
+            }
+        }
+
+        private static List<Dictionary<string, object>> GetBossPositions(Level level)
+        {
+            var positions = new List<Dictionary<string, object>>();
+
+            // Slime-specific handling - get active entity position based on current phase
+            if (level is SlimeLevel slimeLevel)
+            {
+                try
+                {
+                    string currentPhase = GetBossPhase(level);
+
+                    // Determine which entity is active based on phase
+                    if (currentPhase == "Main" || currentPhase == "Generic")
+                    {
+                        var smallSlime = Traverse.Create(slimeLevel).Field("smallSlime").GetValue<SlimeLevelSlime>();
+                        if (smallSlime != null && smallSlime.gameObject.activeInHierarchy)
+                        {
+                            var dict = new Dictionary<string, object>();
+                            dict["x"] = smallSlime.transform.position.x;
+                            dict["y"] = smallSlime.transform.position.y;
+                            positions.Add(dict);
+                        }
+                    }
+                    else if (currentPhase == "BigSlime")
+                    {
+                        var bigSlime = Traverse.Create(slimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
+                        if (bigSlime != null && bigSlime.gameObject.activeInHierarchy)
+                        {
+                            var dict = new Dictionary<string, object>();
+                            dict["x"] = bigSlime.transform.position.x;
+                            dict["y"] = bigSlime.transform.position.y;
+                            positions.Add(dict);
+                        }
+                    }
+                    else if (currentPhase == "Tombstone")
+                    {
+                        var tombStone = Traverse.Create(slimeLevel).Field("tombStone").GetValue<SlimeLevelTombstone>();
+                        if (tombStone != null && tombStone.gameObject.activeInHierarchy)
+                        {
+                            var dict = new Dictionary<string, object>();
+                            dict["x"] = tombStone.transform.position.x;
+                            dict["y"] = tombStone.transform.position.y;
+                            positions.Add(dict);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.WriteLog($"[SLIME POSITION ERROR] {ex.Message}");
+                }
+            }
+
+            // Generic fallback for other bosses
+            if (positions.Count == 0)
+            {
+                try
+                {
+                    var entities = UnityEngine.Object.FindObjectsOfType<AbstractLevelEntity>();
+                    foreach (var entity in entities)
+                    {
+                        if (entity != null && entity.gameObject.activeInHierarchy)
+                        {
+                            var dict = new Dictionary<string, object>();
+                            dict["x"] = entity.transform.position.x;
+                            dict["y"] = entity.transform.position.y;
+                            positions.Add(dict);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.WriteLog($"[GENERIC POSITION ERROR] {ex.Message}");
+                }
+            }
+
+            return positions;
+        }
+
+        private static string GetBossPhase(Level level)
+        {
+            try
+            {
+                // Try to get phase for Slime levels
+                if (level is SlimeLevel slimeLevel)
+                {
+                    var props = Traverse.Create(slimeLevel).Field("properties").GetValue<LevelProperties.Slime>();
+                    if (props != null && props.CurrentState != null)
+                    {
+                        return props.CurrentState.stateName.ToString();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.WriteLog($"[PHASE ERROR] Could not get boss phase: {ex.Message}");
+            }
+            return "Unknown";
+        }
+
+        private static List<Dictionary<string, object>> GetPlayerPositions()
+        {
+            var positions = new List<Dictionary<string, object>>();
+
+            for (int i = 0; i < 2; i++)
+            {
+                var playerId = (PlayerId)i;
+                var player = PlayerManager.GetPlayer(playerId);
+                var dict = new Dictionary<string, object>();
+                dict["player_id"] = i + 1;
+                dict["is_dead"] = (player == null || player.IsDead).ToString().ToLower();
+
+                if (player != null && !player.IsDead)
+                {
+                    dict["x"] = player.center.x;
+                    dict["y"] = player.center.y;
+                }
+                else
+                {
+                    dict["x"] = 0;
+                    dict["y"] = 0;
+                }
+                positions.Add(dict);
+            }
+
+            return positions;
+        }
+
+        private static float GetBossHealth(Level level)
+        {
+            try
+            {
+                return level.timeline != null ? level.timeline.health - level.timeline.damage : 0f;
+            }
+            catch
+            {
+                return 0f;
+            }
+        }
+
+        private static string JsonEncodePositions(List<Dictionary<string, object>> positions)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < positions.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"x\": {positions[i]["x"]}, \"y\": {positions[i]["y"]}");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            return sb.ToString();
+        }
+
+        private static string JsonEncodePlayerPositions(List<Dictionary<string, object>> positions)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < positions.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"player_id\": {positions[i]["player_id"]}, \"is_dead\": {positions[i]["is_dead"]}, \"x\": {positions[i]["x"]}, \"y\": {positions[i]["y"]}");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            return sb.ToString();
         }
     }
 }

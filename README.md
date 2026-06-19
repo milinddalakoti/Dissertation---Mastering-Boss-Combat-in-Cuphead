@@ -76,7 +76,7 @@ Follow the prompts to test keyboard inputs.
 - Expanded action set including aim, duck/crouch, and directional controls
 - Automatic restart after level completion for continuous testing
 
-- ✅ **Position tracking for player and boss**: 
+✅ **Position tracking for player and boss**: 
 - Added position and phase tracking for boss fights
 ```{"event": "state_update", "boss_positions": [{"x": 369, "y": -247}], "boss_phase": "Main"```
 - Added position tracking for player

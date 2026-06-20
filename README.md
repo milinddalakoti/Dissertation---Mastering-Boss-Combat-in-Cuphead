@@ -82,6 +82,12 @@ Follow the prompts to test keyboard inputs.
 - Added position tracking for player
 ```"player_positions": [{"player_id": 1, "is_dead": false, "x": -410, "y": -187.9969}, {"player_id": 2, "is_dead": true, "x": 0, "y": 0}]```
 
+✅ **Phase Jump functionality**: 
+- Can jump to specific boss phases (Main, BigSlime, Tombstone) on level load
+- Configurable via `auto_phase_jump` and `auto_phase_set_health` in `environment_server.py`
+- When `set_health=true`, boss HP is set to phase-appropriate threshold for realistic training
+- Normal mode: BigSlime (76% HP), Tombstone (31% HP)
+
 
 
 
@@ -116,6 +122,18 @@ Python Server: environment_server.py
     ├─ RL Agent: Processes state → selects action
     └─ Sends input: server.send_input(action, value) → pynput → Game
 ```
+
+### Phase Jump Configuration
+Set in `PythonRL/environment_server.py`:
+```python
+server.auto_phase_jump = "BigSlime"      # Auto-jump on level load: "Main", "BigSlime", "Tombstone", or None
+server.auto_phase_set_health = True      # Also set HP to phase threshold when jumping
+```
+
+**Phase Thresholds (Normal difficulty)**:
+- Main: 100% HP (full health)
+- BigSlime: 76% HP (~912/1200)
+- Tombstone: 31% HP (~372/1200)
 
 ## Notes
 

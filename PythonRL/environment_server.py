@@ -34,6 +34,10 @@ class CupheadEnvironmentServer:
         self.press_hold = 0.15        # how long to hold each key (seconds)
         self.burst_duration = 8.0     # how long the random actions last after activation
 
+        # Phase jump configuration - set to "Main", "BigSlime", "Tombstone", or None for normal flow
+        self.auto_phase_jump = None   # Automatically jump to this phase on level load
+        self.auto_phase_set_health = False  # If True, set boss HP to phase threshold when jumping
+
         # Setup logging to file
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuphead_rl.log")
         logging.basicConfig(
@@ -112,6 +116,13 @@ class CupheadEnvironmentServer:
                 self.logger.info(f"LEVEL LOADED: Level: {message.get('level', 'Unknown')}")
                 # Reset state to allow new burst on each level load/restart
                 self._state_received = False
+
+                # Auto phase jump on level load (for Slime boss)
+                # Wait 5 seconds to ensure level is fully initialized (OnLevelStart called, coroutines started)
+                if self.auto_phase_jump and "slime" in message.get('level', '').lower():
+                    self.logger.info(f"LEVEL LOADED: Scheduled auto-jump to phase: {self.auto_phase_jump} (set_health={self.auto_phase_set_health})")
+                    # Send phase jump after a delay to let level initialize with intro sequence
+                    threading.Timer(5.0, lambda: self.send_phase_jump_command(self.auto_phase_jump, self.auto_phase_set_health)).start()
 
                 # If we're not already active, start the delayed action loop
                 if not self._random_active:
@@ -471,6 +482,37 @@ class CupheadEnvironmentServer:
                 self._random_active = False
                 self.logger.info("RANDOM ACTION: Stopped by user request.")
 
+    # ------------------------------------------------------------------
+    # Phase Jump Functionality - start in a specific boss phase
+    # ------------------------------------------------------------------
+    def send_phase_jump_command(self, phase_name, set_health=False):
+        """Send a phase jump command to the plugin to skip to a specific boss phase.
+
+        Args:
+            phase_name: One of "Main", "BigSlime", "Tombstone"
+            set_health: If True, set boss HP to phase threshold value
+        """
+        try:
+            if self.command_socket is None or not self._is_socket_connected(self.command_socket):
+                # Create a new connection for sending commands
+                self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.command_socket.connect((self.host, 5001))
+                self.logger.info(f"[COMMAND SOCKET] Connected to {self.host}:5001")
+
+            # Send command as JSON with newline delimiter
+            command_json = json.dumps({"command": "phase_jump", "phase": phase_name, "set_health": set_health}) + "\n"
+            sent = self.command_socket.send(command_json.encode('utf-8'))
+            if sent:
+                self.logger.info(f"[COMMAND SENT] Phase jump to {phase_name} (set_health={set_health}) ({sent} bytes)")
+                return True
+            else:
+                self.logger.error("Failed to send phase jump command: zero bytes sent")
+                return False
+        except Exception as e:
+            self.logger.error(f"Failed to send phase jump command: {e}")
+            self.command_socket = None
+            return False
+
     def stop(self):
         self.running = False
         self.stop_playback()  # Stop any active playback
@@ -494,8 +536,16 @@ except ImportError:
 if __name__ == "__main__":
     # Simple standalone test
     server = CupheadEnvironmentServer()
+
+    # Optional: Set auto_phase_jump to start in a specific phase
+    # Options: "Main", "BigSlime", "Tombstone", or None for normal flow
+    server.auto_phase_jump = "BigSlime"  # Change this to desired phase
+    server.auto_phase_set_health = True   # Also set HP to phase threshold when jumping
+
     server.start()
     print("Press Ctrl+C to stop the server.")
+    print(f"Auto phase jump set to: {server.auto_phase_jump}")
+    print(f"Auto phase set health: {server.auto_phase_set_health}")
     try:
         # Keep main thread alive
         import time

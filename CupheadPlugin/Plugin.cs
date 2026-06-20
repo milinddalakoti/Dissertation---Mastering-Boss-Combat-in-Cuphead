@@ -2,6 +2,7 @@
 using BepInEx.Logging;
 using HarmonyLib;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -24,10 +25,13 @@ namespace CupheadPlugin
         private static TcpClient _client;
         private static NetworkStream _stream;
 
-        // Networking for receiving restart commands FROM Python (new - minimal)
-        private static TcpListener _restartListener;
-        private static Thread _restartListenerThread;
-        private static bool _restartListenerRunning = false;
+        // Networking for receiving commands (restart + phase jump) FROM Python
+        private static TcpListener _commandListener;
+        private static Thread _commandListenerThread;
+        private static bool _commandListenerRunning = false;
+
+        // Reference to current SlimeLevel for phase control
+        private static SlimeLevel _currentSlimeLevel;
 
         private void Awake()
         {
@@ -37,8 +41,8 @@ namespace CupheadPlugin
             // Connect to Python Server (for sending state ONLY)
             ConnectToServer();
 
-            // Start minimal listener for restart commands FROM Python
-            StartRestartListener();
+            // Start unified listener for restart and phase jump commands FROM Python
+            StartCommandListener();
 
             var harmony = new Harmony("com.milind.cupheadplugin");
 
@@ -48,6 +52,9 @@ namespace CupheadPlugin
 
             // Slime-specific patches
             TryPatch(harmony, typeof(SlimeLevel), "OnStateChanged", typeof(SlimeStateChangedPatch), "Postfix");
+
+            // Patch SlimeLevel.Start to get a reference to the level instance
+            TryPatch(harmony, typeof(SlimeLevel), "PartialInit", typeof(SlimeLevelPartialInitPatch), "Postfix");
 
             // Try catching player death
             TryPatch(harmony, typeof(AbstractPlayerController), "OnDeath", typeof(PlayerDeathPatch), "Postfix");
@@ -136,9 +143,19 @@ namespace CupheadPlugin
             }
         }
 
+        // Patch to capture SlimeLevel instance reference for phase control
+        public static class SlimeLevelPartialInitPatch
+        {
+            public static void Postfix(SlimeLevel __instance)
+            {
+                _currentSlimeLevel = __instance;
+                Plugin.WriteLog($"[SLIME LEVEL] Captured SlimeLevel instance for phase control");
+            }
+        }
+
         private void OnApplicationQuit()
         {
-            StopRestartListener();
+            StopCommandListener();
             if (_stream != null && _stream.CanWrite)
             {
                 try
@@ -190,69 +207,69 @@ namespace CupheadPlugin
             }
         }
 
-        // Restart Listener Functionality (Minimal - for restart commands only)
-        private void StartRestartListener()
+        // Combined command listener (restart + phase jump) - unified on port 5001
+        private void StartCommandListener()
         {
             try
             {
-                _restartListener = new TcpListener(IPAddress.Loopback, 5001); // Port for restart commands
-                _restartListener.Start();
-                _restartListenerRunning = true;
-                _restartListenerThread = new Thread(ListenForRestartCommands);
-                _restartListenerThread.IsBackground = true;
-                _restartListenerThread.Start();
-                WriteLog("[RESTART LISTENER] Listener started on port 5001");
+                _commandListener = new TcpListener(IPAddress.Loopback, 5001);
+                _commandListener.Start();
+                _commandListenerRunning = true;
+                _commandListenerThread = new Thread(ListenForCommands);
+                _commandListenerThread.IsBackground = true;
+                _commandListenerThread.Start();
+                WriteLog("[COMMAND LISTENER] Unified listener started on port 5001 for restart and phase jump commands");
             }
             catch (Exception ex)
             {
-                WriteLog($"[RESTART LISTENER ERROR] Failed to start listener: {ex.Message}");
+                WriteLog($"[COMMAND LISTENER ERROR] Failed to start listener: {ex.Message}");
             }
         }
 
-        private void StopRestartListener()
+        private void StopCommandListener()
         {
-            _restartListenerRunning = false;
-            if (_restartListenerThread != null && _restartListenerThread.IsAlive)
+            _commandListenerRunning = false;
+            if (_commandListenerThread != null && _commandListenerThread.IsAlive)
             {
-                _restartListenerThread.Join(1000); // Wait up to 1 second for thread to finish
+                _commandListenerThread.Join(1000);
             }
-            if (_restartListener != null)
+            if (_commandListener != null)
             {
-                _restartListener.Stop();
+                _commandListener.Stop();
             }
         }
 
-        private void ListenForRestartCommands()
+        private void ListenForCommands()
         {
-            WriteLog("[RESTART LISTENER] Listener thread started");
-            while (_restartListenerRunning)
+            WriteLog("[COMMAND LISTENER] Command listener thread started");
+            while (_commandListenerRunning)
             {
                 try
                 {
-                    if (_restartListener.Pending())
+                    if (_commandListener.Pending())
                     {
-                        TcpClient client = _restartListener.AcceptTcpClient();
-                        Thread clientThread = new Thread(() => HandleRestartCommandClient(client));
+                        TcpClient client = _commandListener.AcceptTcpClient();
+                        Thread clientThread = new Thread(() => HandleCommandClient(client));
                         clientThread.IsBackground = true;
                         clientThread.Start();
                     }
                     else
                     {
-                        Thread.Sleep(10); // Avoid busy waiting
+                        Thread.Sleep(10);
                     }
                 }
                 catch (Exception ex)
                 {
-                    if (_restartListenerRunning)
+                    if (_commandListenerRunning)
                     {
-                        WriteLog($"[RESTART LISTENER ERROR] Listener error: {ex.Message}");
+                        WriteLog($"[COMMAND LISTENER ERROR] Listener error: {ex.Message}");
                     }
                 }
             }
-            WriteLog("[RESTART LISTENER] Listener thread stopped");
+            WriteLog("[COMMAND LISTENER] Command listener thread stopped");
         }
 
-        private void HandleRestartCommandClient(TcpClient client)
+        private void HandleCommandClient(TcpClient client)
         {
             NetworkStream stream = client.GetStream();
             byte[] buffer = new byte[1024];
@@ -260,18 +277,17 @@ namespace CupheadPlugin
 
             try
             {
-                WriteLog("[RESTART LISTENER] Client connected");
-                while (_restartListenerRunning && client.Connected)
+                WriteLog("[COMMAND LISTENER] Command client connected");
+                while (_commandListenerRunning && client.Connected)
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead == 0)
                     {
-                        break; // Client disconnected
+                        break;
                     }
 
                     messageData += Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                    // Process complete messages (separated by newline)
                     while (messageData.Contains("\n"))
                     {
                         int newlinePos = messageData.IndexOf("\n");
@@ -280,40 +296,323 @@ namespace CupheadPlugin
 
                         if (!string.IsNullOrEmpty(message))
                         {
-                            ProcessRestartCommand(message.Trim());
+                            ProcessCommand(message.Trim());
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                WriteLog($"[RESTART LISTENER ERROR] Client handler error: {ex.Message}");
+                WriteLog($"[COMMAND LISTENER ERROR] Client handler error: {ex.Message}");
             }
             finally
             {
                 client.Close();
-                WriteLog("[RESTART LISTENER] Client disconnected");
+                WriteLog("[COMMAND LISTENER] Command client disconnected");
             }
         }
 
-        private void ProcessRestartCommand(string jsonCommand)
+        private void ProcessCommand(string jsonCommand)
         {
             try
             {
-                // Simple JSON parsing for restart command - handle variations in formatting
-                // Expected format: {"command":"restart_level"} or {"command": "restart_level"}
+                Plugin.WriteLog($"[COMMAND RECEIVED] Raw: {jsonCommand}");
+
+                // Handle restart_level command (existing)
                 if (jsonCommand.Contains("restart_level"))
                 {
                     RestartLevel();
+                    return;
                 }
-                else
+
+                // Handle phase_jump command
+                if (jsonCommand.Contains("phase_jump"))
                 {
-                    WriteLog($"[RESTART LISTENER WARN] Unknown command: {jsonCommand}");
+                    // Parse target phase - format: {"command": "phase_jump", "phase": "BigSlime", "set_health": true}
+                    string phaseName = "";
+                    bool setHealth = false;
+
+                    // Extract phase name using simple string parsing
+                    int phaseIndex = jsonCommand.IndexOf("\"phase\"");
+                    if (phaseIndex != -1)
+                    {
+                        int valueStart = jsonCommand.IndexOf("\"", phaseIndex + 7);
+                        int valueEnd = jsonCommand.IndexOf("\"", valueStart + 1);
+                        if (valueStart != -1 && valueEnd != -1)
+                        {
+                            phaseName = jsonCommand.Substring(valueStart + 1, valueEnd - valueStart - 1);
+                        }
+                    }
+
+                    // Extract set_health parameter
+                    int setHealthIdx = jsonCommand.IndexOf("\"set_health\"");
+                    if (setHealthIdx != -1)
+                    {
+                        // JSON format: "set_health":true (or with spaces)
+                        // Start after "set_health": (10 + 2 = 12 chars minimum, but find the actual value)
+                        int valueStart = jsonCommand.IndexOf(':', setHealthIdx);
+                        if (valueStart != -1)
+                        {
+                            string healthStr = jsonCommand.Substring(valueStart + 1).Split('}')[0].Trim();
+                            setHealth = healthStr == "true";
+                            Plugin.WriteLog($"[PHASE JUMP DEBUG] set_health parsing: setHealthIdx={setHealthIdx}, healthStr='{healthStr}', result={setHealth}");
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(phaseName))
+                    {
+                        JumpToPhase(phaseName, setHealth);
+                    }
+                    else
+                    {
+                        WriteLog("[PHASE JUMP ERROR] No phase specified in command");
+                    }
+                    return;
                 }
+
+                WriteLog($"[COMMAND LISTENER WARN] Unknown command: {jsonCommand}");
             }
             catch (Exception ex)
             {
-                WriteLog($"[RESTART LISTENER ERROR] Failed to process command '{jsonCommand}': {ex.Message}");
+                WriteLog($"[COMMAND LISTENER ERROR] Failed to process command '{jsonCommand}': {ex.Message}");
+            }
+        }
+
+        // Phase Jump Functionality
+        private void JumpToPhase(string phaseName, bool setHealthToThreshold = false)
+        {
+            Plugin.WriteLog($"[PHASE JUMP] Attempting to jump to phase: {phaseName} (set_health={setHealthToThreshold})");
+
+            try
+            {
+                if (_currentSlimeLevel == null)
+                {
+                    Plugin.WriteLog("[PHASE JUMP ERROR] No SlimeLevel instance captured. Is the boss fight active?");
+                    return;
+                }
+
+                // Map phase name to States enum value
+                LevelProperties.Slime.States targetState = LevelProperties.Slime.States.Main;
+                if (phaseName == "BigSlime")
+                    targetState = LevelProperties.Slime.States.BigSlime;
+                else if (phaseName == "Tombstone")
+                    targetState = LevelProperties.Slime.States.Tombstone;
+                else if (phaseName == "Main" || phaseName == "Generic")
+                    targetState = LevelProperties.Slime.States.Main;
+                else
+                {
+                    Plugin.WriteLog($"[PHASE JUMP ERROR] Unknown phase: {phaseName}");
+                    return;
+                }
+
+                // Get current state to check if we're already in target phase
+                var props = Traverse.Create(_currentSlimeLevel).Field("properties").GetValue<LevelProperties.Slime>();
+                if (props == null)
+                {
+                    Plugin.WriteLog("[PHASE JUMP ERROR] Could not access Slime properties");
+                    return;
+                }
+
+                if (props.CurrentState.stateName == targetState)
+                {
+                    Plugin.WriteLog($"[PHASE JUMP] Already in target phase: {phaseName}");
+                    return;
+                }
+
+                // Find the target state index and health trigger
+                int targetStateIndex = -1;
+                float targetHealthTrigger = 1.0f; // Default to full health
+                for (int i = 0; i < 3; i++) // Slime has max 3 phases
+                {
+                    try
+                    {
+                        var stateField = Traverse.Create(props).Field("states");
+                        var statesArray = stateField.GetValue<LevelProperties.Slime.State[]>();
+                        if (statesArray != null && i < statesArray.Length)
+                        {
+                            if (statesArray[i].stateName == targetState)
+                            {
+                                targetStateIndex = i;
+                                targetHealthTrigger = statesArray[i].healthTrigger;
+                                break;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Continue to next index
+                    }
+                }
+
+                if (targetStateIndex == -1)
+                {
+                    Plugin.WriteLog($"[PHASE JUMP ERROR] Target phase {phaseName} not found in state array");
+                    return;
+                }
+
+                // Use Traverse to set stateIndex (private field)
+                Traverse.Create(props).Field("stateIndex").SetValue(targetStateIndex);
+
+                // Handle phase transition manually (avoid calling OnStateChanged which stops coroutines)
+                // Note: we do NOT call OnStateChanged() because it calls StopAllCoroutines()
+                // Instead we manually call the transformation methods
+                try
+                {
+                    if (targetState == LevelProperties.Slime.States.BigSlime)
+                    {
+                        // Stop existing coroutines (like slimePattern_cr) that use pattern arrays
+                        // This prevents IndexOutOfRangeException on empty BigSlime pattern arrays
+                        _currentSlimeLevel.StopAllCoroutines();
+                        Plugin.WriteLog("[PHASE JUMP] Stopped existing coroutines to prevent pattern array errors");
+
+                        // Set health to phase threshold if requested
+                        if (setHealthToThreshold && targetHealthTrigger < 1.0f)
+                        {
+                            float totalHealth = _currentSlimeLevel.timeline.health;
+                            float targetHealth = totalHealth * targetHealthTrigger;
+                            float targetDamage = totalHealth - targetHealth;
+                            Plugin.WriteLog($"[PHASE JUMP DEBUG] Total health: {totalHealth}, targetHealth: {targetHealth}, targetDamage: {targetDamage}");
+                            bool fieldSet = false;
+                            
+                            // Try multiple approaches to set the damage value
+                            // Approach 1: Try to find the backing field
+                            var damageField = AccessTools.Field(typeof(Level.Timeline), "<damage>k__BackingField");
+                            if (damageField != null)
+                            {
+                                damageField.SetValue(_currentSlimeLevel.timeline, targetDamage);
+                                fieldSet = true;
+                            }
+                            
+                            // Approach 2: Use reflection to set private property setter
+                            if (!fieldSet)
+                            {
+                                try
+                                {
+                                    var damageProperty = AccessTools.Property(typeof(Level.Timeline), "damage");
+                                    var setter = damageProperty.GetSetMethod(true);
+                                    if (setter != null)
+                                    {
+                                        setter.Invoke(_currentSlimeLevel.timeline, new object[] { targetDamage });
+                                        fieldSet = true;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Plugin.WriteLog($"[PHASE JUMP WARN] Property setter failed: {ex.Message}");
+                                }
+                            }
+                            
+                            // Approach 3: Use Traverse with backing field name
+                            if (!fieldSet)
+                            {
+                                try
+                                {
+                                    Traverse.Create(_currentSlimeLevel.timeline).Field("damage").SetValue(targetDamage);
+                                    fieldSet = true;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Plugin.WriteLog($"[PHASE JUMP WARN] Traverse damage field failed: {ex.Message}");
+                                }
+                            }
+                            
+                            Plugin.WriteLog($"[PHASE JUMP] Set boss HP to {targetHealth:F1} (threshold: {targetHealthTrigger:P0}), damage field set: {fieldSet}");
+                        }
+
+                        // Mark that we've reached BigSlime state
+                        Traverse.Create(_currentSlimeLevel).Field("reachedBigSlimeState").SetValue(true);
+
+                        // Set property state on bigSlime BEFORE transformation (TurnBig calls bigSlime.StartJump which uses CurrentPropertyState)
+                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
+                        var bigSlimePropertyStateField = Traverse.Create(bigSlime).Field("CurrentPropertyState");
+                        bigSlimePropertyStateField.SetValue(props.CurrentState);
+
+                        // Use TurnBig for immediate transformation (not Transform which waits for landing)
+                        var smallSlime = Traverse.Create(_currentSlimeLevel).Field("smallSlime").GetValue<SlimeLevelSlime>();
+                        // Stop smallSlime coroutines before transformation to prevent crashes
+                        smallSlime.StopAllCoroutines();
+                        var turnBigMethod = AccessTools.Method(typeof(SlimeLevelSlime), "TurnBig");
+                        turnBigMethod?.Invoke(smallSlime, new object[] { });
+                        Plugin.WriteLog("[PHASE JUMP] Called TurnBig on smallSlime for immediate transformation");
+                        
+                        // Note: bigSlime's own jump_cr is started inside TurnBig via StartJump()
+                        // The level's pattern coroutine is NOT used for BigSlime (empty patterns array)
+                    }
+                    else if (targetState == LevelProperties.Slime.States.Tombstone)
+                    {
+                        // Stop existing coroutines on the level and entities to prevent errors
+                        _currentSlimeLevel.StopAllCoroutines();
+
+                        // Set health to phase threshold if requested
+                        if (setHealthToThreshold && targetHealthTrigger < 1.0f)
+                        {
+                            float totalHealth = _currentSlimeLevel.timeline.health;
+                            float targetHealth = totalHealth * targetHealthTrigger;
+                            float targetDamage = totalHealth - targetHealth;
+                            Plugin.WriteLog($"[PHASE JUMP DEBUG] Total health: {totalHealth}, targetHealth: {targetHealth}, targetDamage: {targetDamage}");
+                            bool fieldSet = false;
+                            
+                            // Try multiple approaches to set the damage value
+                            var damageField = AccessTools.Field(typeof(Level.Timeline), "<damage>k__BackingField");
+                            if (damageField != null)
+                            {
+                                damageField.SetValue(_currentSlimeLevel.timeline, targetDamage);
+                                fieldSet = true;
+                            }
+                            if (!fieldSet)
+                            {
+                                try
+                                {
+                                    var damageProperty = AccessTools.Property(typeof(Level.Timeline), "damage");
+                                    var setter = damageProperty.GetSetMethod(true);
+                                    if (setter != null)
+                                    {
+                                        setter.Invoke(_currentSlimeLevel.timeline, new object[] { targetDamage });
+                                        fieldSet = true;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Plugin.WriteLog($"[PHASE JUMP WARN] Property setter failed: {ex.Message}");
+                                }
+                            }
+                            if (!fieldSet)
+                            {
+                                try
+                                {
+                                    Traverse.Create(_currentSlimeLevel.timeline).Field("damage").SetValue(targetDamage);
+                                    fieldSet = true;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Plugin.WriteLog($"[PHASE JUMP WARN] Traverse damage field failed: {ex.Message}");
+                                }
+                            }
+                            Plugin.WriteLog($"[PHASE JUMP] Set boss HP to {targetHealth:F1} (threshold: {targetHealthTrigger:P0}), damage field set: {fieldSet}");
+                        }
+
+                        // Death transform for tombstone phase
+                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
+                        bigSlime.StopAllCoroutines(); // Stop entity coroutines too
+                        var deathTransformMethod = AccessTools.Method(typeof(SlimeLevelSlime), "DeathTransform");
+                        deathTransformMethod?.Invoke(bigSlime, new object[] { });
+                        Plugin.WriteLog("[PHASE JUMP] Called DeathTransform on bigSlime");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.WriteLog($"[PHASE JUMP WARN] Could not handle phase transformation: {ex.Message}");
+                }
+
+                Plugin.WriteLog($"[PHASE JUMP SUCCESS] Jumped to phase: {phaseName} (index {targetStateIndex})");
+
+                // Send confirmation
+                SendState($"{{\"event\": \"phase_jump\", \"target_phase\": \"{phaseName}\", \"success\": true}}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.WriteLog($"[PHASE JUMP ERROR] Failed: {ex.Message}");
+                Plugin.SendState($"{{\"event\": \"phase_jump\", \"target_phase\": \"{phaseName}\", \"success\": false, \"error\": \"{ex.Message}\"}}");
             }
         }
 

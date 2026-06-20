@@ -591,12 +591,25 @@ namespace CupheadPlugin
                             Plugin.WriteLog($"[PHASE JUMP] Set boss HP to {targetHealth:F1} (threshold: {targetHealthTrigger:P0}), damage field set: {fieldSet}");
                         }
 
+                        // Mark that we've reached BigSlime state (required for tombstone transition)
+                        Traverse.Create(_currentSlimeLevel).Field("reachedBigSlimeState").SetValue(true);
+
                         // Death transform for tombstone phase
+                        // First, if we're coming from Main phase (smallSlime still active), transform to BigSlime first
+                        var smallSlime = Traverse.Create(_currentSlimeLevel).Field("smallSlime").GetValue<SlimeLevelSlime>();
+                        if (smallSlime != null)
+                        {
+                            smallSlime.StopAllCoroutines();
+                            var turnBigMethod = AccessTools.Method(typeof(SlimeLevelSlime), "TurnBig");
+                            turnBigMethod?.Invoke(smallSlime, new object[] { });
+                            Plugin.WriteLog("[PHASE JUMP] Transformed smallSlime to bigSlime before tombstone");
+                        }
+
                         var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
                         bigSlime.StopAllCoroutines(); // Stop entity coroutines too
                         var deathTransformMethod = AccessTools.Method(typeof(SlimeLevelSlime), "DeathTransform");
                         deathTransformMethod?.Invoke(bigSlime, new object[] { });
-                        Plugin.WriteLog("[PHASE JUMP] Called DeathTransform on bigSlime");
+                        Plugin.WriteLog("[PHASE JUMP] Called DeathTransform on bigSlime for Tombstone");
                     }
                 }
                 catch (Exception ex)

@@ -6,7 +6,10 @@ import csv
 import os
 import random
 import logging
-from pynput.keyboard import Key, Controller
+from pynput.keyboard import Key, Controller, KeyCode
+
+# Setup logging to file
+logger = logging.getLogger('CupheadEnv')
 
 class CupheadEnvironmentServer:
     def __init__(self, host='127.0.0.1', port=5000):
@@ -16,6 +19,7 @@ class CupheadEnvironmentServer:
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.running = False
         self.latest_state = {}
+        self._state_lock = threading.Lock()  # Thread-safe state access
         self.keyboard = Controller()  # For pynput keyboard control
         self.command_socket = None  # For sending commands to the game (port 5001)
         self.playback_thread = None
@@ -30,33 +34,24 @@ class CupheadEnvironmentServer:
         self._random_lock = threading.Lock()
         self._random_thread = None
         self._state_received = False  # Track if we've seen genuine game state
-        self.action_interval = 0.3    # seconds between each action press/release
-        self.press_hold = 0.15        # how long to hold each key (seconds)
+
+        # Gym mode - disable random actions when used with PPO/Gym
+        self._gym_mode = False
+        self._fight_active = False   # Track if fight has actually started (not just level loaded)
+        self.action_interval = 0.5    # seconds between each action press/release (increased for stability)
+        self.press_hold = 0.2       # how long to hold each key (seconds) - increased for stability
         self.burst_duration = 8.0     # how long the random actions last after activation
+        self._last_burst_end = 0    # track burst end time for debouncing
 
         # Phase jump configuration - set to "Main", "BigSlime", "Tombstone", or None for normal flow
         self.auto_phase_jump = None   # Automatically jump to this phase on level load
         self.auto_phase_set_health = False  # If True, set boss HP to phase threshold when jumping
 
-        # Setup logging to file
-        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuphead_rl.log")
-        logging.basicConfig(
-            level=logging.INFO,
-            format='[%(asctime)s] %(message)s',
-            datefmt='%H:%M:%S',
-            handlers=[
-                logging.FileHandler(log_path, encoding='utf-8'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger('CupheadRL')
-        self.logger.info(f"Log file created at: {log_path}")
-
     def start(self):
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(1)
         self.running = True
-        self.logger.info(f"Python RL Environment Server listening on {self.host}:{self.port}")
+        print(f"[*] Python RL Environment Server listening on {self.host}:{self.port}")
 
         # Run server in a thread so it doesn't block
         thread = threading.Thread(target=self._accept_connections)
@@ -67,11 +62,11 @@ class CupheadEnvironmentServer:
         while self.running:
             try:
                 client_socket, addr = self.server_socket.accept()
-                self.logger.info(f"Connected to Cuphead Engine at {addr}")
+                print(f"[+] Connected to Cuphead Engine at {addr}")
                 self._handle_client(client_socket)
             except Exception as e:
                 if self.running:
-                    self.logger.error(f"Error accepting connections: {e}")
+                    print(f"[-] Error accepting connections: {e}")
 
     def _handle_client(self, client_socket):
         buffer = ""
@@ -79,7 +74,7 @@ class CupheadEnvironmentServer:
             try:
                 data = client_socket.recv(1024).decode('utf-8')
                 if not data:
-                    self.logger.warning("Cuphead Engine disconnected. Waiting for reconnect...")
+                    print("[-] Cuphead Engine disconnected. Waiting for reconnect...")
                     break
 
                 buffer += data
@@ -90,10 +85,10 @@ class CupheadEnvironmentServer:
                         self._process_message(line)
 
             except ConnectionResetError:
-                self.logger.warning("Cuphead Engine connection reset. Waiting for reconnect...")
+                print("[-] Cuphead Engine connection reset. Waiting for reconnect...")
                 break
             except Exception as e:
-                self.logger.error(f"Client handler error: {e}")
+                print(f"[-] Client handler error: {e}")
                 break
 
         client_socket.close()
@@ -101,32 +96,37 @@ class CupheadEnvironmentServer:
     def _process_message(self, message_str):
         try:
             message = json.loads(message_str)
-            self.latest_state.update(message)
-            self.logger.info(f"STATE UPDATE: {json.dumps(message)}")
+            with self._state_lock:
+                # Preserve terminal events (player_dead, boss_dead) - don't let state_update overwrite them
+                existing_event = self.latest_state.get('event', '')
+                is_terminal_event = existing_event in ('player_dead', 'boss_dead')
+                
+                self.latest_state.update(message)
+                
+                # If we had a terminal event, preserve it and don't let state_update overwrite
+                if is_terminal_event:
+                    # Keep the terminal event, but update other fields like player_positions
+                    original_event = existing_event
+                    original_win = self.latest_state.get('win', '')
+                    self.latest_state['event'] = original_event
+                    self.latest_state['win'] = original_win
 
-            # Check for episode end to trigger automatic restart
-            self._check_episode_end_and_restart(message)
+            # Check for episode end to trigger automatic restart (only in random mode, NOT gym/PPO mode)
+            # In PPO mode, ppo_training.py handles restarts via _check_done
+            if not self._gym_mode:
+                self._check_episode_end_and_restart(message)
 
-            # ---- NEW: Detect fight start/restart and manage random actions ----
+            # ---- Detect fight start/restart and manage random actions ----
             event_type = message.get("event", "NO_EVENT")
-            self.logger.info(f"Processing message - Event: '{event_type}', Full message: {json.dumps(message)}")
 
             # Handle level loaded events (fight start or restart)
             if event_type == "level_loaded":
-                self.logger.info(f"LEVEL LOADED: Level: {message.get('level', 'Unknown')}")
-                # Reset state to allow new burst on each level load/restart
                 self._state_received = False
-
-                # Auto phase jump on level load (for Slime boss)
-                # Wait 5 seconds to ensure level is fully initialized (OnLevelStart called, coroutines started)
-                if self.auto_phase_jump and "slime" in message.get('level', '').lower():
-                    self.logger.info(f"LEVEL LOADED: Scheduled auto-jump to phase: {self.auto_phase_jump} (set_health={self.auto_phase_set_health})")
-                    # Send phase jump after a delay to let level initialize with intro sequence
-                    threading.Timer(5.0, lambda: self.send_phase_jump_command(self.auto_phase_jump, self.auto_phase_set_health)).start()
+                self._fight_active = False
 
                 # If we're not already active, start the delayed action loop
-                if not self._random_active:
-                    self.logger.info(f"FIGHT START DETECTED: Received level_loaded event - starting delayed random action burst.")
+                if not self._random_active and not self._gym_mode:
+                    logger.info(f"FIGHT START DETECTED: Received level_loaded event - starting delayed random action burst.")
                     with self._random_lock:
                         if not self._random_active:
                             self._random_active = True
@@ -137,47 +137,41 @@ class CupheadEnvironmentServer:
                                 daemon=True,
                             )
                             self._random_thread.start()
-                            self.logger.info(f"RANDOM THREAD: Random action thread started - THREAD ID: {self._random_thread.ident if self._random_thread else 'None'}")
+                            logger.info(f"RANDOM THREAD: Random action thread started - THREAD ID: {self._random_thread.ident if self._random_thread else 'None'}")
                 else:
-                    self.logger.info(f"FIGHT RESTART: Level reloaded while actions were active - continuing current burst")
+                    logger.info(f"FIGHT RESTART: Level reloaded while actions were active - continuing current burst")
 
             # Ignore our own connection confirmation message
             elif event_type == "connected":
-                self.logger.info("Ignoring our own connection confirmation message")
+                pass  # Ignore silently
 
-            # Handle any other genuine game state update as fallback
-            elif not self._state_received and event_type != "NO_EVENT" and event_type != "connected":
-                self._state_received = True
-                self.logger.info(f"FIGHT START DETECTED: Received game state update - starting delayed random action burst.")
-                with self._random_lock:
-                    if not self._random_active:
-                        self._random_active = True
-                        # Start the random action loop with a 3-second delay
-                        self._random_thread = threading.Thread(
-                            target=self._delayed_random_action_loop,
-                            args=(self.burst_duration,),
-                            daemon=True,
-                        )
-                        self._random_thread.start()
-                        self.logger.info(f"RANDOM THREAD: Random action thread started - THREAD ID: {self._random_thread.ident if self._random_thread else 'None'}")
+            # Handle state_update - mark fight as active and start random actions if needed
+            elif event_type == "state_update":
+                # Check if this is actual gameplay (not just level load)
+                boss_positions = message.get('boss_positions', [{}])
+                level_time = message.get('level_time', 0)
+                boss_phase = message.get('boss_phase', 'Unknown')
+                # If we have real gameplay state, mark fight as active
+                # Fight starts when: boss has position, level_time > 0.1s, or boss phase is known (not Unknown/Generic)
+                boss_phase_active = boss_phase not in ('Unknown', 'Generic')
+                if (boss_positions and len(boss_positions) > 0 and boss_positions[0].get('x', 0) != 0) or level_time > 0.1 or boss_phase_active:
+                    self._fight_active = True
+                    if not self._state_received and not self._gym_mode:
+                        self._state_received = True
+                        logger.info(f"Fight start detected via state: {event_type}")
             else:
-                # Log what we're receiving for debugging
-                if event_type != "NO_EVENT":
-                    self.logger.info(f"Received event: {event_type} - waiting for fight start")
-                else:
-                    self.logger.info(f"Message has no event field: {json.dumps(message)}")
-            # If a burst is already running we let it continue; when it ends,
-            # the next state update will start a new burst (keeps actions going
-            # throughout the fight).
+                # Silent for NO_EVENT
+                pass
         except json.JSONDecodeError:
-            self.logger.warning(f"Failed to parse JSON: {message_str}")
+            print(f"[!] Failed to parse JSON: {message_str}")
         except Exception as e:
-            self.logger.error(f"Unexpected error in _process_message: {e}")
+            print(f"[!] Unexpected error in _process_message: {e}")
             import traceback
-            traceback.print_exc()
+            print(traceback.format_exc())
 
     def get_state(self):
-        return self.latest_state
+        with self._state_lock:
+            return dict(self.latest_state)  # Return a copy to avoid external modifications
 
     def send_input(self, action, value=1.0):
         """Send input to the game using pynput"""
@@ -187,39 +181,31 @@ class CupheadEnvironmentServer:
                 self._release_key(action)
                 return
 
-            # Press key based on action
+            # Press key based on action - silent for live display compatibility
             if action == "move_left":
                 self.keyboard.press(Key.left)
-                self.logger.info("[INPUT] Move Left")
             elif action == "move_right":
                 self.keyboard.press(Key.right)
-                self.logger.info("[INPUT] Move Right")
             elif action == "aim_up":
                 self.keyboard.press(Key.up)
-                self.logger.info("[INPUT] Aim Up")
             elif action == "duck_crouch":
                 self.keyboard.press(Key.down)
-                self.logger.info("[INPUT] Duck/Crouch")
             elif action == "jump":
-                self.keyboard.press(KeyCode.from_char('z'))  # Z key for jump
-                self.logger.info("[INPUT] Jump")
+                self.keyboard.press(KeyCode.from_char('z'))
             elif action == "shoot":
-                self.keyboard.press(KeyCode.from_char('x'))  # X key for shoot
-                self.logger.info("[INPUT] Shoot")
+                self.keyboard.press(KeyCode.from_char('x'))
             elif action == "dash":
-                self.keyboard.press(Key.shift)  # Left Shift key for dash
-                self.logger.info("[INPUT] Dash")
+                self.keyboard.press(Key.shift)
             elif action == "directional_aim":
-                self.keyboard.press(KeyCode.from_char('c'))  # C key for directional aim
-                self.logger.info("[INPUT] Directional Aim")
+                self.keyboard.press(KeyCode.from_char('c'))
             else:
-                self.logger.warning(f"[INPUT WARN] Unknown action: {action}")
+                pass  # Unknown action - silent
 
         except Exception as e:
-            self.logger.error(f"[INPUT ERROR] Failed to send input '{action}': {e}")
+            print(f"[INPUT ERROR] Failed to send input '{action}': {e}")
 
     def _release_key(self, action):
-        """Release a specific key"""
+        """Release a specific key - silent for live display compatibility"""
         try:
             key_map = {
                 "move_left": Key.left,
@@ -234,9 +220,8 @@ class CupheadEnvironmentServer:
 
             if action in key_map:
                 self.keyboard.release(key_map[action])
-                self.logger.info(f"[INPUT RELEASE] {action}")
         except Exception as e:
-            self.logger.error(f"[INPUT ERROR] Failed to release key '{action}': {e}")
+            print(f"[INPUT ERROR] Failed to release key '{action}': {e}")
 
     def send_inputs(self, actions_dict):
         """Send multiple inputs based on a dictionary"""
@@ -251,7 +236,7 @@ class CupheadEnvironmentServer:
                 # Create a new connection for sending commands
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.command_socket.connect((self.host, 5001))  # Different port for commands
-                self.logger.info(f"Command socket connected to {self.host}:5001")
+                print(f"[+] Command socket connected to {self.host}:5001")
             elif not self._is_socket_connected(self.command_socket):
                 # Socket exists but is not connected, recreate it
                 try:
@@ -260,20 +245,20 @@ class CupheadEnvironmentServer:
                     pass
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.command_socket.connect((self.host, 5001))  # Different port for commands
-                self.logger.info(f"Command socket reconnected to {self.host}:5001")
+                print(f"[+] Command socket reconnected to {self.host}:5001")
 
             # Send command as JSON with newline delimiter
             command_json = json.dumps({"command": "restart_level"}) + "\n"
             sent = self.command_socket.send(command_json.encode('utf-8'))
             if sent:
-                self.logger.info(f"[COMMAND SENT] Restart level command ({sent} bytes)")
+                print(f"[COMMAND SENT] Restart level command ({sent} bytes)")
                 return True
             else:
-                self.logger.error("Failed to send restart command: zero bytes sent")
+                print(f"[-] Failed to send restart command: zero bytes sent")
                 self.command_socket = None
                 return False
         except Exception as e:
-            self.logger.error(f"Failed to send restart command: {e}")
+            print(f"[-] Failed to send restart command: {e}")
             self.command_socket = None
             return False
 
@@ -289,34 +274,74 @@ class CupheadEnvironmentServer:
     def _check_episode_end_and_restart(self, message):
         """Check if the message indicates episode end and trigger restart"""
         try:
-            # Debug: Print the message we're checking
-            self.logger.info(f"Checking episode end: {json.dumps(message)}")
+            event = message.get("event")
+            win = message.get("win")
+            # Only act on explicit death events, never on level_loaded or other events
+            # Normalize win value for comparison (handle boolean and string forms)
+            is_win = win is True or (isinstance(win, str) and win.lower() == 'true')
+            is_loss = win is False or (isinstance(win, str) and win.lower() == 'false')
 
-            # Boss death with win = True
-            if message.get("event") == "boss_dead" and message.get("win") == True:
-                self.logger.info("EPISODE END: Boss defeated! Scheduling restart...")
-                threading.Timer(2.0, self.send_restart_command).start()  # Restart after 2 seconds
-
-            # Player death with win = False
-            elif message.get("event") == "player_dead" and message.get("win") == False:
-                self.logger.info("EPISODE END: Player died! Scheduling restart...")
-                threading.Timer(2.0, self.send_restart_command).start()  # Restart after 2 seconds
-            else:
-                # More detailed debug for troubleshooting
-                event = message.get("event")
-                win = message.get("win")
-                self.logger.info(f"Not triggering restart - event: {event}, win: {win}")
+            if event == "boss_dead" and is_win:
+                print(f"[RESTART] Boss dead - scheduling restart")
+                threading.Timer(2.0, self.send_restart_command).start()
+            elif event == "player_dead" and is_loss:
+                print(f"[RESTART] Player dead - scheduling restart")
+                threading.Timer(2.0, self.send_restart_command).start()
+            # Ignore all other events including level_loaded
         except Exception as e:
-            self.logger.error(f"Failed to check episode end: {e}")
+            print(f"[ERROR] Failed to check episode end: {e}")
             import traceback
             traceback.print_exc()
+
+    def clear_state_for_new_episode(self):
+        """Thread-safe state clearing for episode transitions"""
+        with self._state_lock:
+            self.latest_state['event'] = ''
+            self.latest_state['win'] = None
+            self.latest_state['player_positions'] = [
+                {'player_id': 1, 'is_dead': False, 'x': 0, 'y': 0, 'health': 3},
+                {'player_id': 2, 'is_dead': False, 'x': 0, 'y': 0, 'health': 3}
+            ]
+            self.latest_state['boss_positions'] = [{}]
+            self.latest_state['boss_hp'] = 1200
+            self.latest_state['boss_hp_pct'] = 100.0
+            self.latest_state['boss_phase'] = 'Unknown'
+
+    # PHASE JUMP FUNCTIONALITY
+    def send_phase_jump_command(self, phase_name, set_health=False):
+        """Send a phase jump command to the plugin to skip to a specific boss phase.
+
+        Args:
+            phase_name: One of "Main", "BigSlime", "Tombstone"
+            set_health: If True, set boss HP to phase threshold value
+        """
+        try:
+            if self.command_socket is None or not self._is_socket_connected(self.command_socket):
+                # Create a new connection for sending commands
+                self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.command_socket.connect((self.host, 5001))
+                print(f"[+] Command socket connected to {self.host}:5001 for phase jump")
+
+            # Send command as JSON with newline delimiter
+            command_json = json.dumps({"command": "phase_jump", "phase": phase_name, "set_health": set_health}) + "\n"
+            sent = self.command_socket.send(command_json.encode('utf-8'))
+            if sent:
+                print(f"[COMMAND SENT] Phase jump to {phase_name} (set_health={set_health}) ({sent} bytes)")
+                return True
+            else:
+                print(f"[-] Failed to send phase jump command: zero bytes sent")
+                return False
+        except Exception as e:
+            print(f"[-] Failed to send phase jump command: {e}")
+            self.command_socket = None
+            return False
 
     # CSV PLAYBACK FUNCTIONALITY
     def load_csv_playback(self, file_path):
         """Load CSV data for playback"""
         try:
             if not os.path.exists(file_path):
-                self.logger.error(f"CSV file not found: {file_path}")
+                print(f"[ERROR] CSV file not found: {file_path}")
                 return False
 
             self.csv_data = []
@@ -333,24 +358,24 @@ class CupheadEnvironmentServer:
                             'value': value
                         })
                     except (ValueError, KeyError) as e:
-                        self.logger.warning(f"Skipping invalid row in CSV: {row} - {e}")
+                        print(f"[WARNING] Skipping invalid row in CSV: {row} - {e}")
 
             # Sort by time offset to ensure proper sequence
             self.csv_data.sort(key=lambda x: x['time_offset'])
-            self.logger.info(f"PLAYBACK: Loaded {len(self.csv_data)} commands from {file_path}")
+            print(f"[PLAYBACK] Loaded {len(self.csv_data)} commands from {file_path}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to load CSV playback: {e}")
+            print(f"[ERROR] Failed to load CSV playback: {e}")
             return False
 
     def start_playback(self, loop=False):
         """Start playing back the loaded CSV data"""
         if not self.csv_data:
-            self.logger.error("No CSV data loaded for playback")
+            print(f"[ERROR] No CSV data loaded for playback")
             return False
 
         if self.playback_active:
-            self.logger.warning("Playback already active")
+            print(f"[WARNING] Playback already active")
             return False
 
         self.playback_active = True
@@ -362,7 +387,7 @@ class CupheadEnvironmentServer:
         self.playback_thread = threading.Thread(target=self._playback_worker)
         self.playback_thread.daemon = True
         self.playback_thread.start()
-        self.logger.info(f"PLAYBACK: Started playback (loop={loop})")
+        print(f"[PLAYBACK] Started playback (loop={loop})")
         return True
 
     def stop_playback(self):
@@ -370,17 +395,17 @@ class CupheadEnvironmentServer:
         self.playback_active = False
         if self.playback_thread:
             self.playback_thread.join(timeout=1.0)
-        self.logger.info("PLAYBACK: Stopped playback")
+        print(f"[PLAYBACK] Stopped playback")
 
     def pause_playback(self):
         """Pause the current playback"""
         self.playback_paused = True
-        self.logger.info("PLAYBACK: Playback paused")
+        print(f"[PLAYBACK] Playback paused")
 
     def resume_playback(self):
         """Resume the paused playback"""
         self.playback_paused = False
-        self.logger.info("PLAYBACK: Playback resumed")
+        print(f"[PLAYBACK] Playback resumed")
 
     def _playback_worker(self):
         """Worker thread for CSV playback"""
@@ -412,14 +437,14 @@ class CupheadEnvironmentServer:
             if self.playback_active and self.loop:
                 self.csv_index = 0
                 self.playback_start_time = time.time()
-                self.logger.info("PLAYBACK: Looping playback")
+                print(f"[PLAYBACK] Looping playback")
                 # Continue the loop (will go back to start of while)
             else:
                 self.playback_active = False
-                self.logger.info("PLAYBACK: Playback completed")
+                print(f"[PLAYBACK] Playback completed")
 
         except Exception as e:
-            self.logger.error(f"PLAYBACK ERROR: Playback worker error: {e}")
+            print(f"[PLAYBACK ERROR] Playback worker error: {e}")
         finally:
             self.playback_active = False
 
@@ -427,14 +452,13 @@ class CupheadEnvironmentServer:
     def _delayed_random_action_loop(self, duration):
         """
         Waits 3 seconds for the fight to actually start, then runs the random action loop.
+        Silent for live display compatibility.
         """
-        self.logger.info("RANDOM LOOP: Waiting 3 seconds for fight to start...")
         time.sleep(3.0)  # Wait for fight to actually begin after level load
 
         if not self.running:
             return
 
-        self.logger.info("RANDOM LOOP: Starting random action loop after 3-second delay")
         self._random_action_loop(duration)
 
     # ------------------------------------------------------------------
@@ -445,32 +469,33 @@ class CupheadEnvironmentServer:
         Repeatedly pick a random action, press it for `self.press_hold` seconds,
         release, then wait the remainder of `self.action_interval` before the next.
         Runs for `duration` seconds or until the server is stopped.
+        GUARDRAIL: Stops immediately on player death to prevent menu navigation.
         """
         end_time = time.time() + duration
         actions = ["move_left", "move_right", "jump", "shoot", "dash"]
         action_count = 0
 
-        self.logger.info(f"RANDOM LOOP: Starting random action loop for {duration} seconds")
-
         while time.time() < end_time and self.running:
+            # CRITICAL FIX: Check if we should stop (guardrail check)
+            with self._random_lock:
+                if not self._random_active:
+                    return
+                # GUARDRAIL: Stop on player death (was detected in previous state update)
+                state = dict(self.latest_state)  # Thread-safe copy
+                if state.get('event') == 'player_dead':
+                    print(f"[RANDOM ACTION] Player died - stopping random actions to prevent menu navigation")
+                    return
+
             action = random.choice(actions)
             action_count += 1
-            # Press
-            self.logger.info(f"RANDOM LOOP: Action #{action_count}: Pressing {action}")
             self.send_input(action, 1.0)
-            self.logger.info(f"RANDOM INPUT: Press {action}")
             time.sleep(self.press_hold)
-            # Release
-            self.logger.info(f"RANDOM LOOP: Action #{action_count}: Releasing {action}")
             self.send_input(action, 0.0)
-            self.logger.info(f"RANDOM INPUT: Release {action}")
-            # Wait the rest of the interval
             time.sleep(max(0.0, self.action_interval - self.press_hold))
 
         # Clean up flag
         with self._random_lock:
             self._random_active = False
-            self.logger.info(f"RANDOM ACTION: Burst finished after {action_count} actions.")
 
     # ------------------------------------------------------------------
     # Optional: expose a method to stop random actions early
@@ -480,38 +505,7 @@ class CupheadEnvironmentServer:
         with self._random_lock:
             if self._random_active:
                 self._random_active = False
-                self.logger.info("RANDOM ACTION: Stopped by user request.")
-
-    # ------------------------------------------------------------------
-    # Phase Jump Functionality - start in a specific boss phase
-    # ------------------------------------------------------------------
-    def send_phase_jump_command(self, phase_name, set_health=False):
-        """Send a phase jump command to the plugin to skip to a specific boss phase.
-
-        Args:
-            phase_name: One of "Main", "BigSlime", "Tombstone"
-            set_health: If True, set boss HP to phase threshold value
-        """
-        try:
-            if self.command_socket is None or not self._is_socket_connected(self.command_socket):
-                # Create a new connection for sending commands
-                self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.command_socket.connect((self.host, 5001))
-                self.logger.info(f"[COMMAND SOCKET] Connected to {self.host}:5001")
-
-            # Send command as JSON with newline delimiter
-            command_json = json.dumps({"command": "phase_jump", "phase": phase_name, "set_health": set_health}) + "\n"
-            sent = self.command_socket.send(command_json.encode('utf-8'))
-            if sent:
-                self.logger.info(f"[COMMAND SENT] Phase jump to {phase_name} (set_health={set_health}) ({sent} bytes)")
-                return True
-            else:
-                self.logger.error("Failed to send phase jump command: zero bytes sent")
-                return False
-        except Exception as e:
-            self.logger.error(f"Failed to send phase jump command: {e}")
-            self.command_socket = None
-            return False
+                print("[RANDOM ACTION] Stopped by user request.")
 
     def stop(self):
         self.running = False
@@ -536,16 +530,9 @@ except ImportError:
 if __name__ == "__main__":
     # Simple standalone test
     server = CupheadEnvironmentServer()
-
-    # Optional: Set auto_phase_jump to start in a specific phase
-    # Options: "Main", "BigSlime", "Tombstone", or None for normal flow
-    server.auto_phase_jump = "BigSlime"  # Change this to desired phase
-    server.auto_phase_set_health = True   # Also set HP to phase threshold when jumping
-
     server.start()
     print("Press Ctrl+C to stop the server.")
-    print(f"Auto phase jump set to: {server.auto_phase_jump}")
-    print(f"Auto phase set health: {server.auto_phase_set_health}")
+    print("To auto-jump to a phase, set server.auto_phase_jump before server.start()")
     try:
         # Keep main thread alive
         import time

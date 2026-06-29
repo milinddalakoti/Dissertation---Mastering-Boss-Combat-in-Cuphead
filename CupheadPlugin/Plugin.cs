@@ -207,6 +207,19 @@ namespace CupheadPlugin
             }
         }
 
+        // Method to close connection cleanly
+        static private void CloseConnection()
+        {
+            if (_stream != null)
+            {
+                try { _stream.Close(); } catch { }
+            }
+            if (_client != null)
+            {
+                try { _client.Close(); } catch { }
+            }
+        }
+
         // Combined command listener (restart + phase jump) - unified on port 5001
         private void StartCommandListener()
         {
@@ -473,7 +486,7 @@ namespace CupheadPlugin
                             float targetDamage = totalHealth - targetHealth;
                             Plugin.WriteLog($"[PHASE JUMP DEBUG] Total health: {totalHealth}, targetHealth: {targetHealth}, targetDamage: {targetDamage}");
                             bool fieldSet = false;
-                            
+
                             // Try multiple approaches to set the damage value
                             // Approach 1: Try to find the backing field
                             var damageField = AccessTools.Field(typeof(Level.Timeline), "<damage>k__BackingField");
@@ -482,7 +495,7 @@ namespace CupheadPlugin
                                 damageField.SetValue(_currentSlimeLevel.timeline, targetDamage);
                                 fieldSet = true;
                             }
-                            
+
                             // Approach 2: Use reflection to set private property setter
                             if (!fieldSet)
                             {
@@ -501,7 +514,7 @@ namespace CupheadPlugin
                                     Plugin.WriteLog($"[PHASE JUMP WARN] Property setter failed: {ex.Message}");
                                 }
                             }
-                            
+
                             // Approach 3: Use Traverse with backing field name
                             if (!fieldSet)
                             {
@@ -515,26 +528,33 @@ namespace CupheadPlugin
                                     Plugin.WriteLog($"[PHASE JUMP WARN] Traverse damage field failed: {ex.Message}");
                                 }
                             }
-                            
+
                             Plugin.WriteLog($"[PHASE JUMP] Set boss HP to {targetHealth:F1} (threshold: {targetHealthTrigger:P0}), damage field set: {fieldSet}");
                         }
 
-                        // Mark that we've reached BigSlime state
+                        // IMPORTANT: Set reachedBigSlimeState BEFORE calling TurnBig
+                        // This ensures the bigSlime entity knows the proper state during transformation
                         Traverse.Create(_currentSlimeLevel).Field("reachedBigSlimeState").SetValue(true);
 
-                        // Set property state on bigSlime BEFORE transformation (TurnBig calls bigSlime.StartJump which uses CurrentPropertyState)
-                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
-                        var bigSlimePropertyStateField = Traverse.Create(bigSlime).Field("CurrentPropertyState");
-                        bigSlimePropertyStateField.SetValue(props.CurrentState);
-
-                        // Use TurnBig for immediate transformation (not Transform which waits for landing)
+                        // Get smallSlime reference
                         var smallSlime = Traverse.Create(_currentSlimeLevel).Field("smallSlime").GetValue<SlimeLevelSlime>();
+
+                        // Set bigSlime property state BEFORE transformation (TurnBig calls bigSlime.StartJump which uses CurrentPropertyState)
+                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
+                        if (bigSlime != null)
+                        {
+                            var bigSlimePropertyStateField = Traverse.Create(bigSlime).Field("CurrentPropertyState");
+                            bigSlimePropertyStateField.SetValue(props.CurrentState);
+                        }
+
                         // Stop smallSlime coroutines before transformation to prevent crashes
-                        smallSlime.StopAllCoroutines();
-                        var turnBigMethod = AccessTools.Method(typeof(SlimeLevelSlime), "TurnBig");
-                        turnBigMethod?.Invoke(smallSlime, new object[] { });
-                        Plugin.WriteLog("[PHASE JUMP] Called TurnBig on smallSlime for immediate transformation");
-                        
+                        if (smallSlime != null)
+                        {
+                            smallSlime.StopAllCoroutines();
+                            var turnBigMethod = AccessTools.Method(typeof(SlimeLevelSlime), "TurnBig");
+                            turnBigMethod?.Invoke(smallSlime, new object[] { });
+                            Plugin.WriteLog("[PHASE JUMP] Called TurnBig on smallSlime for immediate transformation");
+                        }
                         // Note: bigSlime's own jump_cr is started inside TurnBig via StartJump()
                         // The level's pattern coroutine is NOT used for BigSlime (empty patterns array)
                     }
@@ -551,7 +571,7 @@ namespace CupheadPlugin
                             float targetDamage = totalHealth - targetHealth;
                             Plugin.WriteLog($"[PHASE JUMP DEBUG] Total health: {totalHealth}, targetHealth: {targetHealth}, targetDamage: {targetDamage}");
                             bool fieldSet = false;
-                            
+
                             // Try multiple approaches to set the damage value
                             var damageField = AccessTools.Field(typeof(Level.Timeline), "<damage>k__BackingField");
                             if (damageField != null)
@@ -591,10 +611,13 @@ namespace CupheadPlugin
                             Plugin.WriteLog($"[PHASE JUMP] Set boss HP to {targetHealth:F1} (threshold: {targetHealthTrigger:P0}), damage field set: {fieldSet}");
                         }
 
-                        // Mark that we've reached BigSlime state (required for tombstone transition)
+                        // IMPORTANT: Set reachedBigSlimeState BEFORE any transformation
+                        // This is required for Tombstone transition since it expects BigSlime state to be active
                         Traverse.Create(_currentSlimeLevel).Field("reachedBigSlimeState").SetValue(true);
 
-                        // Death transform for tombstone phase
+                        // Get bigSlime reference for transformation
+                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
+
                         // First, if we're coming from Main phase (smallSlime still active), transform to BigSlime first
                         var smallSlime = Traverse.Create(_currentSlimeLevel).Field("smallSlime").GetValue<SlimeLevelSlime>();
                         if (smallSlime != null)
@@ -605,11 +628,18 @@ namespace CupheadPlugin
                             Plugin.WriteLog("[PHASE JUMP] Transformed smallSlime to bigSlime before tombstone");
                         }
 
-                        var bigSlime = Traverse.Create(_currentSlimeLevel).Field("bigSlime").GetValue<SlimeLevelSlime>();
-                        bigSlime.StopAllCoroutines(); // Stop entity coroutines too
-                        var deathTransformMethod = AccessTools.Method(typeof(SlimeLevelSlime), "DeathTransform");
-                        deathTransformMethod?.Invoke(bigSlime, new object[] { });
-                        Plugin.WriteLog("[PHASE JUMP] Called DeathTransform on bigSlime for Tombstone");
+                        // Stop bigSlime coroutines too before death transform
+                        if (bigSlime != null)
+                        {
+                            bigSlime.StopAllCoroutines();
+                            var deathTransformMethod = AccessTools.Method(typeof(SlimeLevelSlime), "DeathTransform");
+                            deathTransformMethod?.Invoke(bigSlime, new object[] { });
+                            Plugin.WriteLog("[PHASE JUMP] Called DeathTransform on bigSlime for Tombstone");
+                        }
+                        else
+                        {
+                            Plugin.WriteLog("[PHASE JUMP WARN] bigSlime reference is null, cannot perform DeathTransform");
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -897,17 +927,54 @@ namespace CupheadPlugin
                 var player = PlayerManager.GetPlayer(playerId);
                 var dict = new Dictionary<string, object>();
                 dict["player_id"] = i + 1;
-                dict["is_dead"] = (player == null || player.IsDead).ToString().ToLower();
 
-                if (player != null && !player.IsDead)
+                // Only report dead if player exists and is actually dead from combat
+                // During level load, player is null but that's NOT death
+                if (player == null)
                 {
-                    dict["x"] = player.center.x;
-                    dict["y"] = player.center.y;
+                    // Player hasn't spawned yet - NOT dead, just waiting for join animation
+                    dict["is_dead"] = "false";
+                    dict["x"] = 0;
+                    dict["y"] = 0;
+                    dict["health"] = 3;  // Full health pending spawn
                 }
                 else
                 {
-                    dict["x"] = 0;
-                    dict["y"] = 0;
+                    dict["is_dead"] = player.IsDead.ToString().ToLower();
+                    if (!player.IsDead)
+                    {
+                        dict["x"] = player.center.x;
+                        dict["y"] = player.center.y;
+                        int playerHealth = 0;
+                        try
+                        {
+                            var stats = player.stats;
+                            Plugin.WriteLog($"[PLAYER HEALTH DEBUG] player={player != null}, stats={stats != null}, playerId={player?.id}");
+                            if (stats != null)
+                            {
+                                playerHealth = stats.Health;
+                                Plugin.WriteLog($"[PLAYER HEALTH DEBUG] Read health value: {playerHealth}, type=int");
+                            }
+                            else
+                            {
+                                playerHealth = 3;  // No stats yet, assume full health
+                                Plugin.WriteLog($"[PLAYER HEALTH DEBUG] No stats, setting health=3");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            playerHealth = 3;
+                            Plugin.WriteLog($"[PLAYER HEALTH ERROR] Failed to get health: {ex.Message}, setting to 3");
+                        }
+                        Plugin.WriteLog($"[PLAYER HEALTH FINAL] Setting dict[\"health\"] = {playerHealth}");
+                        dict["health"] = playerHealth;
+                    }
+                    else
+                    {
+                        dict["x"] = 0;
+                        dict["y"] = 0;
+                        dict["health"] = 0;
+                    }
                 }
                 positions.Add(dict);
             }
@@ -950,7 +1017,9 @@ namespace CupheadPlugin
             {
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
-                sb.Append($"\"player_id\": {positions[i]["player_id"]}, \"is_dead\": {positions[i]["is_dead"]}, \"x\": {positions[i]["x"]}, \"y\": {positions[i]["y"]}");
+                var health = positions[i].ContainsKey("health") ? positions[i]["health"] : "MISSING";
+                Plugin.WriteLog($"[JSON DEBUG] Player {i} - has health key: {positions[i].ContainsKey("health")}, value: {health}");
+                sb.Append($"\"player_id\": {positions[i]["player_id"]}, \"is_dead\": \"{positions[i]["is_dead"]}\", \"x\": {positions[i]["x"]}, \"y\": {positions[i]["y"]}, \"health\": {health}");
                 sb.Append("}");
             }
             sb.Append("]");

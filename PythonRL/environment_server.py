@@ -50,6 +50,8 @@ class CupheadEnvironmentServer:
     def start(self):
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(1)
+        # Set timeout on accept to allow checking self.running periodically
+        self.server_socket.settimeout(1.0)
         self.running = True
         print(f"[*] Python RL Environment Server listening on {self.host}:{self.port}")
 
@@ -64,12 +66,17 @@ class CupheadEnvironmentServer:
                 client_socket, addr = self.server_socket.accept()
                 print(f"[+] Connected to Cuphead Engine at {addr}")
                 self._handle_client(client_socket)
+            except socket.timeout:
+                # Timeout is expected - just continue loop to check self.running
+                continue
             except Exception as e:
                 if self.running:
                     print(f"[-] Error accepting connections: {e}")
 
     def _handle_client(self, client_socket):
         buffer = ""
+        # Set timeout on client socket to allow checking self.running
+        client_socket.settimeout(1.0)
         while self.running:
             try:
                 data = client_socket.recv(1024).decode('utf-8')
@@ -84,6 +91,9 @@ class CupheadEnvironmentServer:
                     if line.strip():
                         self._process_message(line)
 
+            except socket.timeout:
+                # Timeout is expected - just continue loop to check self.running
+                continue
             except ConnectionResetError:
                 print("[-] Cuphead Engine connection reset. Waiting for reconnect...")
                 break
@@ -173,6 +183,25 @@ class CupheadEnvironmentServer:
         with self._state_lock:
             return dict(self.latest_state)  # Return a copy to avoid external modifications
 
+    def is_connected(self):
+        """Check if we have an active connection to Cuphead."""
+        try:
+            # Check if we have any state data (indicates connection is alive)
+            if self.latest_state.get('event') in ('level_loaded', 'state_update', 'boss_hit', 'player_dead', 'boss_dead', 'connected'):
+                return True
+            return False
+        except:
+            return False
+
+    def wait_for_connection(self, timeout=30.0):
+        """Wait for Cuphead to reconnect after a disconnect."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.is_connected():
+                return True
+            time.sleep(0.5)
+        return False
+
     def send_input(self, action, value=1.0):
         """Send input to the game using pynput"""
         try:
@@ -232,19 +261,20 @@ class CupheadEnvironmentServer:
     def send_restart_command(self):
         """Send a restart command to the game via TCP on port 5001"""
         try:
+            # Create socket with timeout to prevent indefinite blocking
             if self.command_socket is None:
-                # Create a new connection for sending commands
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.command_socket.connect((self.host, 5001))  # Different port for commands
+                self.command_socket.settimeout(5.0)  # 5 second timeout for connect/send
+                self.command_socket.connect((self.host, 5001))
                 print(f"[+] Command socket connected to {self.host}:5001")
             elif not self._is_socket_connected(self.command_socket):
-                # Socket exists but is not connected, recreate it
                 try:
                     self.command_socket.close()
                 except:
                     pass
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.command_socket.connect((self.host, 5001))  # Different port for commands
+                self.command_socket.settimeout(5.0)
+                self.command_socket.connect((self.host, 5001))
                 print(f"[+] Command socket reconnected to {self.host}:5001")
 
             # Send command as JSON with newline delimiter
@@ -257,6 +287,10 @@ class CupheadEnvironmentServer:
                 print(f"[-] Failed to send restart command: zero bytes sent")
                 self.command_socket = None
                 return False
+        except socket.timeout:
+            print(f"[-] Restart command timed out after 5s")
+            self.command_socket = None
+            return False
         except Exception as e:
             print(f"[-] Failed to send restart command: {e}")
             self.command_socket = None
@@ -319,6 +353,7 @@ class CupheadEnvironmentServer:
             if self.command_socket is None or not self._is_socket_connected(self.command_socket):
                 # Create a new connection for sending commands
                 self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.command_socket.settimeout(5.0)
                 self.command_socket.connect((self.host, 5001))
                 print(f"[+] Command socket connected to {self.host}:5001 for phase jump")
 
@@ -331,6 +366,10 @@ class CupheadEnvironmentServer:
             else:
                 print(f"[-] Failed to send phase jump command: zero bytes sent")
                 return False
+        except socket.timeout:
+            print(f"[-] Phase jump command timed out after 5s")
+            self.command_socket = None
+            return False
         except Exception as e:
             print(f"[-] Failed to send phase jump command: {e}")
             self.command_socket = None

@@ -17,18 +17,27 @@ from stable_baselines3.common.monitor import Monitor
 from environment_server import CupheadEnvironmentServer
 from live_display import LiveDisplay, LiveDisplayCallback, integrate_with_env
 
-# Setup logging
-log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ppo_training.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_path, mode='w', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# Module-level logger (will be configured in train_ppo())
 logger = logging.getLogger('PPOTraining')
+
+# Dedicated restart debug logger
+restart_debug_logger = None
+def get_restart_debug_logger():
+    global restart_debug_logger
+    if restart_debug_logger is None:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs_data", "training_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        log_path = os.path.join(log_dir, f"RESTART_DEBUG_{timestamp}.log")
+        restart_debug_logger = logging.getLogger('RestartDebug')
+        restart_debug_logger.setLevel(logging.DEBUG)
+        handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+        handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S'))
+        restart_debug_logger.addHandler(handler)
+    return restart_debug_logger
+
+# Legacy file paths for backward compatibility
+LEGACY_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_runs.csv")
 
 class EpisodeCountCallback(BaseCallback):
     """Callback to stop after N episodes."""
@@ -46,7 +55,32 @@ class CupheadGymEnv(gym.Env):
     """Gym environment wrapper for Cuphead."""
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, host='127.0.0.1', port=5000, display: LiveDisplay = None):
+    # Class-level logger (initialized once)
+    _logger = None
+    _log_path = None
+
+    @classmethod
+    def _get_logger(cls, max_episodes):
+        """Get or create logger with new file naming convention."""
+        if cls._logger is None:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs_data", "training_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            log_path = os.path.join(log_dir, f"CUPHEAD_{timestamp}_{max_episodes}_episodes.log")
+            cls._log_path = log_path
+            logging.basicConfig(
+                level=logging.INFO,
+                format='[%(asctime)s] %(levelname)s: %(message)s',
+                datefmt='%H:%M:%S',
+                handlers=[
+                    logging.FileHandler(log_path, mode='w', encoding='utf-8'),
+                    logging.StreamHandler()
+                ]
+            )
+            cls._logger = logging.getLogger('PPOTraining')
+        return cls._logger
+
+    def __init__(self, host='127.0.0.1', port=5000, display: LiveDisplay = None, max_episodes=10):
         super().__init__()
         self.server = CupheadEnvironmentServer(host, port)
         self.display = display  # Optional live display
@@ -74,6 +108,11 @@ class CupheadGymEnv(gym.Env):
         self.death_time = None
         self.actions_this_episode = []
         self.fight_active = False  # Track whether fight has actually started (not just level loaded)
+        self.max_episodes = max_episodes  # Store for file naming
+
+        # Convergence tracking
+        self.episode_outcomes = []  # Track (win, damage, duration) for convergence detection
+        self.convergence_check_interval = 50  # Check every N episodes
 
         # Reward shaping
         self.win_reward = 100
@@ -81,28 +120,40 @@ class CupheadGymEnv(gym.Env):
         self.hit_reward = 0.5
         self.survival_reward = 0.01
 
-        # CSV logging
-        self.csv_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training_runs.csv")
+        # CSV logging - use runs_data folder with naming convention
+        self.csv_log_path = None  # Will be initialized on first use
 
         # Track player health at episode end
         self.player_end_health = 3  # Will be updated in step()
 
-        # Initialize CSV file with headers on creation
-        if not os.path.exists(self.csv_log_path):
-            with open(self.csv_log_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['run_number','actions_sequence','score','boss_damage_total',
-                    'fight_duration_seconds','first_damage_time','second_damage_time','death_time_seconds',
-                    'player_end_health'])  # Added player_end_health column
-
         # Disable random actions when used with Gym
         self.server._gym_mode = True
 
+    def _initialize_csv_path(self, max_episodes):
+        """Initialize CSV file path with runs_data folder and naming convention."""
+        csv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs_data", "csv_logs")
+        os.makedirs(csv_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        return os.path.join(csv_dir, f"CUPHEAD_{timestamp}_{max_episodes}_episodes.csv")
+
     def reset(self, seed=None, options=None):
         """Reset environment - wait for level_loaded (server already started)."""
+        global logger
+
+        # Initialize logger on first reset
+        if CupheadGymEnv._logger is None:
+            CupheadGymEnv._logger = CupheadGymEnv._get_logger(self.max_episodes)
+            logger = CupheadGymEnv._logger
+
+        # Initialize CSV path on first reset
+        if self.csv_log_path is None:
+            self.csv_log_path = self._initialize_csv_path(self.max_episodes)
+
         # Increment run number for NEW episode
         # This happens when transitioning to a new episode (called after previous episode ends)
         self.run_number += 1
+
+        logger.info(f"[RESET] Starting reset for episode #{self.run_number}")
 
         # Reset tracking
         self.steps = 0
@@ -133,34 +184,12 @@ class CupheadGymEnv(gym.Env):
         # Use thread-safe clear method
         self.server.clear_state_for_new_episode()
 
+        logger.info(f"[RESET] Reset complete for episode #{self.run_number}")
         return self._get_observation(), {}
 
     def step(self, action):
         """Execute one step with configurable timing between actions."""
         self.steps += 1
-
-        # Check for terminal event from previous state BEFORE we get new state
-        # This handles the race condition where player_dead event arrives between steps
-        with self.server._state_lock:
-            previous_event = self.server.latest_state.get('event', '')
-            if previous_event == 'player_dead':
-                logger.info(f"EPISODE: Detected pending player_dead event - ending episode now. Steps: {self.steps}")
-                self.death_time = time.time() - self.episode_start_time if self.episode_start_time else 0
-                self._log_episode()
-                threading.Timer(2.0, self.server.send_restart_command).start()
-                self.server.latest_state['event'] = ''
-                self.server.latest_state['win'] = None
-                return self._get_observation(), 0.0, True, False, {'raw_state': self.server.latest_state}
-            elif previous_event == 'boss_dead':
-                win_val = self.server.latest_state.get('win')
-                if win_val is True or win_val == True or win_val == 'true' or win_val == 'True':
-                    logger.info(f"EPISODE: Detected pending boss_dead event - ending episode now. Steps: {self.steps}")
-                self.death_time = None
-                self._log_episode()
-                threading.Timer(2.0, self.server.send_restart_command).start()
-                self.server.latest_state['event'] = ''
-                self.server.latest_state['win'] = None
-                return self._get_observation(), 0.0, True, False, {'raw_state': self.server.latest_state}
 
         # Detect fight start - when we see actual player/boss activity
         # (level_loaded event fires, but fight_active only becomes True when we see
@@ -228,6 +257,8 @@ class CupheadGymEnv(gym.Env):
 
         reward = self._calculate_reward(state)
         self.final_score += reward
+
+        # Check for terminal event - this will log and send restart
         done = self._check_done(state)
 
         return self._get_observation(), reward, done, False, {'raw_state': state}
@@ -276,7 +307,9 @@ class CupheadGymEnv(gym.Env):
         return reward
 
     def _check_done(self, state):
-        event = state.get('event', '')
+        # Check latest_state for terminal events (in case they arrived since we got state)
+        with self.server._state_lock:
+            event = self.server.latest_state.get('event', '')
         # Normalize event name for robust matching (strip whitespace, handle case variations)
         event = event.strip().lower() if isinstance(event, str) else ''
 
@@ -285,12 +318,14 @@ class CupheadGymEnv(gym.Env):
             logger.info(f"[DEBUG] Step {self.steps}: event='{event}', raw_win={state.get('win')}, player_positions={state.get('player_positions')}")
 
         # Player death event from Plugin (explicit) - process regardless of fight_active
-        # ONLY listen to the explicit player_dead event to avoid false positives
         if event == 'player_dead':
             logger.info(f"EPISODE: Player dead event received - logging and restarting. Steps this episode: {self.steps}")
             self.death_time = time.time() - self.episode_start_time if self.episode_start_time else 0
             self._log_episode()
-            threading.Timer(2.0, self.server.send_restart_command).start()
+            # Clear the event to prevent re-processing in training loop
+            with self.server._state_lock:
+                self.server.latest_state['event'] = ''
+                self.server.latest_state['win'] = None
             return True
 
         # Boss death event (explicit win condition) - check both boolean and string forms
@@ -301,7 +336,10 @@ class CupheadGymEnv(gym.Env):
             logger.info("EPISODE: Boss dead - logging and restarting")
             self.death_time = None
             self._log_episode()
-            threading.Timer(2.0, self.server.send_restart_command).start()
+            # Clear the event to prevent re-processing in training loop
+            with self.server._state_lock:
+                self.server.latest_state['event'] = ''
+                self.server.latest_state['win'] = None
             return True
 
         if self.steps >= self.max_steps:
@@ -311,6 +349,28 @@ class CupheadGymEnv(gym.Env):
 
         return False
 
+    def _get_convergence_metrics(self, window=50):
+        """Calculate convergence metrics over the last N episodes."""
+        if len(self.episode_outcomes) < window:
+            return None
+        recent = self.episode_outcomes[-window:]
+        wins = sum(1 for o in recent if o['win'])
+        avg_damage = sum(o['damage'] for o in recent) / len(recent)
+        avg_duration = sum(o['duration'] for o in recent) / len(recent)
+        return {
+            'win_rate': wins / len(recent),
+            'avg_damage': avg_damage,
+            'avg_duration': avg_duration,
+            'episodes_since_first_win': self._get_episodes_since_first_win()
+        }
+
+    def _get_episodes_since_first_win(self):
+        """Get number of episodes since first win (for plateau detection)."""
+        for i in range(len(self.episode_outcomes) - 1, -1, -1):
+            if self.episode_outcomes[i]['win']:
+                return len(self.episode_outcomes) - 1 - i
+        return len(self.episode_outcomes)  # No wins yet
+
     def _log_episode(self):
         if self.episode_start_time is None:
             return
@@ -319,22 +379,37 @@ class CupheadGymEnv(gym.Env):
         second_damage = self.damage_events[1] if len(self.damage_events) > 1 else ""
         actions_str = ", ".join(self.actions_this_episode)
 
+        # Track episode outcome for convergence detection
+        # win = (death_time is None and total_damage > 0) means boss was defeated
+        win = self.death_time is None and self.total_damage > 0
+        self.episode_outcomes.append({
+            'win': win,
+            'damage': self.total_damage,
+            'duration': fight_duration
+        })
+
         try:
             # Ensure directory exists
             os.makedirs(os.path.dirname(self.csv_log_path), exist_ok=True)
 
+            # Check if file needs headers (first write)
+            write_header = not os.path.exists(self.csv_log_path)
             with open(self.csv_log_path, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(['run_number','actions_sequence','score','boss_damage_total',
+                        'fight_duration_seconds','first_damage_time','second_damage_time','death_time_seconds',
+                        'player_end_health'])
                 row = [self.run_number, actions_str, round(self.final_score, 2),
                     round(self.total_damage, 2), round(fight_duration, 2),
                     round(first_damage, 2) if first_damage else "",
                     round(second_damage, 2) if second_damage else "",
                     round(self.death_time, 2) if self.death_time else "",
-                    self.player_end_health]  # Player health at episode end
+                    self.player_end_health]
                 writer.writerow(row)
                 f.flush()
                 os.fsync(f.fileno())  # Force write to disk
-            logger.info(f"[CSV] Logged to training_runs.csv - Run #{self.run_number}")
+            logger.info(f"[CSV] Logged to {os.path.basename(self.csv_log_path)} - Run #{self.run_number}")
         except Exception as e:
             logger.error(f"CSV error: {e}")
             print(f"[CSV ERROR] {e}")
@@ -342,12 +417,31 @@ class CupheadGymEnv(gym.Env):
     def close(self):
         self.server.stop()
 
-def train_ppo(max_episodes=10, save_path='ppo_cuphead_model', enable_display=True):
+def migrate_legacy_files():
+    """Migrate legacy training_runs.csv to runs_data folder."""
+    try:
+        if os.path.exists(LEGACY_CSV_PATH):
+            csv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs_data", "csv_logs")
+            os.makedirs(csv_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            new_path = os.path.join(csv_dir, f"CUPHEAD_{timestamp}_migrated.csv")
+            # Copy legacy file to new location
+            import shutil
+            shutil.copy2(LEGACY_CSV_PATH, new_path)
+            print(f"[MIGRATION] Moved training_runs.csv to {new_path}")
+    except Exception as e:
+        print(f"[MIGRATION] Could not migrate legacy files: {e}")
+
+def train_ppo(max_episodes=1000, save_path='ppo_cuphead_model', enable_display=True):
     """Train PPO agent for exactly N episodes (complete boss fights)."""
+    migrate_legacy_files()  # Migrate legacy files if they exist
+
     print("=" * 60)
     print("PPO TRAINING - Cuphead RL")
     print("=" * 60)
     print(f"Target: {max_episodes} episodes | Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("=" * 60)
+    print(f"Output folders: runs_data/csv_logs/ and runs_data/training_logs/")
     print("=" * 60)
 
     # Create live display
@@ -356,7 +450,7 @@ def train_ppo(max_episodes=10, save_path='ppo_cuphead_model', enable_display=Tru
         display.start()
 
     # Create environment with display
-    env = CupheadGymEnv(display=display)
+    env = CupheadGymEnv(display=display, max_episodes=max_episodes)
 
     # Start server and wait for level_loaded BEFORE creating PPO model
     env.server.start()
@@ -391,14 +485,23 @@ def train_ppo(max_episodes=10, save_path='ppo_cuphead_model', enable_display=Tru
     print(f"Training {max_episodes} episodes...\n")
     start_time = time.time()
 
+    # Initialize restart debug logger
+    restart_log = get_restart_debug_logger()
+    restart_log.info(f"[TRAINING START] Beginning {max_episodes} episode training run")
+
     # Train for N episodes using manual loop
     episodes_completed = 0
     obs, _ = env.reset()  # This increments run_number to 1
+    restart_log.info(f"[TRAINING LOOP] First obs received, starting main loop")
     time.sleep(2)  # Wait 2 seconds before first input stream
 
     while episodes_completed < max_episodes:
         action, _ = model.predict(obs, deterministic=False)
         obs, reward, done, truncated, _ = env.step(int(action))
+
+        # Heartbeat log every 100 steps to confirm training is alive
+        if env.steps % 100 == 0:
+            restart_log.info(f"[TRAINING HEARTBEAT] Episode {episodes_completed}, Step {env.steps}, Reward: {reward:.2f}, Done: {done}")
 
         # Predict and set next action for display (what will happen next step)
         if hasattr(env, 'display') and env.display:
@@ -407,26 +510,63 @@ def train_ppo(max_episodes=10, save_path='ppo_cuphead_model', enable_display=Tru
 
         if done or truncated:
             episodes_completed += 1
-            logger.info(f"Episode {episodes_completed}/{max_episodes} complete")
 
-            # Wait for level_loaded after restart (with timeout to prevent infinite loop)
-            logger.info("Waiting for level_loaded after restart...")
+            # Convergence detection and logging every 50 episodes
+            if episodes_completed % 50 == 0:
+                metrics = env._get_convergence_metrics(window=50)
+                if metrics:
+                    logger.info(f"[CONVERGENCE] Episodes {episodes_completed}: win_rate={metrics['win_rate']:.2%}, avg_damage={metrics['avg_damage']:.0f}, avg_duration={metrics['avg_duration']:.1f}s, episodes_since_first_win={metrics['episodes_since_first_win']}")
+
+            # Clear terminal event FIRST (thread-safe, no logging while holding lock)
+            # _check_done() already cleared event/win, but defensive clear ensures clean state
+            with env.server._state_lock:
+                if 'event' in env.server.latest_state:
+                    env.server.latest_state['event'] = ''
+                if 'win' in env.server.latest_state:
+                    env.server.latest_state['win'] = None
+
+            # Log AFTER releasing lock - prevents lock ordering deadlock with client handler
+            logger.info(f"Episode {episodes_completed}/{max_episodes} complete, calling reset...")
+
+            # Send restart command with timeout protection
+            threading.Timer(2.0, env.server.send_restart_command).start()
+
+            # Wait for level_loaded after restart (with reconnection handling)
+            logger.info("[RESTART LOOP] Waiting for level_loaded after restart...")
             wait_start = time.time()
-            max_wait_time = 15.0  # Maximum 15 seconds to wait for level_loaded
+            max_wait_time = 90.0  # Extended timeout for slower restarts
+            consecutive_empty_states = 0
+            loop_iterations = 0
             while time.time() - wait_start < max_wait_time:
+                loop_iterations += 1
                 state = env.server.get_state()
-                if state.get('event') == 'level_loaded':
-                    logger.info("Level loaded - resuming")
+                event = state.get('event', '')
+
+                # Log every 5 seconds to show we're alive
+                elapsed = time.time() - wait_start
+                if int(elapsed) % 5 == 0 and int(elapsed) > 0 and loop_iterations % 50 == 1:
+                    restart_log.info(f"[RESTART LOOP] Waiting... {elapsed:.0f}s elapsed, event='{event}', fight_active={env.fight_active}, connected={env.server.is_connected()}")
+
+                # Check for reconnection using server's connection status
+                if not env.server.is_connected():
+                    consecutive_empty_states += 1
+                    if consecutive_empty_states == 5:  # 0.5s of disconnection
+                        restart_log.warning("[RESTART LOOP] Connection lost - waiting for reconnection...")
+                else:
+                    consecutive_empty_states = 0
+
+                if event == 'level_loaded':
+                    restart_log.info(f"[RESTART LOOP] Level loaded detected after {elapsed:.1f}s - proceeding")
                     break
-                # Also check if event indicates something went wrong
-                if state.get('event') in ('player_dead', 'boss_dead'):
-                    logger.info("Level already in terminal state - continuing")
-                    break
+                # DON'T break on terminal events - we already processed them
                 time.sleep(0.1)
             else:
-                logger.warning("Timeout waiting for level_loaded - forcing continue")
-            time.sleep(2)  # Wait 2 seconds after level load before next input stream
+                restart_log.warning(f"[RESTART LOOP] Timeout after {max_wait_time}s - level_loaded never arrived")
+
+            time.sleep(3)  # Wait 3 seconds after level load before next input stream
+            restart_log.info("[RESTART LOOP] Calling env.reset() for next episode...")
             obs, _ = env.reset()  # This will increment run_number for next episode
+            restart_log.info(f"[RESTART LOOP] Reset complete, obs shape: {obs.shape if hasattr(obs, 'shape') else 'N/A'}")
 
     print(f"\nTraining completed {episodes_completed} episodes in {time.time() - start_time:.1f}s")
 

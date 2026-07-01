@@ -174,7 +174,7 @@ namespace CupheadPlugin
             }
         }
 
-        private void ConnectToServer()
+        static private void ConnectToServer()
         {
             try
             {
@@ -200,10 +200,57 @@ namespace CupheadPlugin
                     _stream.Write(data, 0, data.Length);
                     _stream.Flush();
                 }
+                else
+                {
+                    // Stream is null or not writable - attempt reconnection
+                    WriteLog("[TCP] Stream not available, attempting reconnection...");
+                    TryReconnect();
+                }
             }
             catch (Exception ex)
             {
-                WriteLog($"[TCP ERROR] Failed to send state: {ex.Message}");
+                WriteLog($"[TCP ERROR] Failed to send state: {ex.Message}. Attempting reconnection...");
+                TryReconnect();
+            }
+        }
+
+        private static void TryReconnect()
+        {
+            CloseConnection();
+            // Try to reconnect with a delay to avoid spamming
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    Thread.Sleep(1000); // Wait 1 second before retry
+                    ConnectToServer();
+                    if (_stream != null && _stream.CanWrite)
+                    {
+                        WriteLog($"[TCP] Reconnected successfully (attempt {attempt + 1})");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"[TCP] Reconnection attempt {attempt + 1} failed: {ex.Message}");
+                }
+            }
+            WriteLog("[TCP ERROR] All reconnection attempts failed");
+        }
+
+        private static bool IsConnectionValid()
+        {
+            try
+            {
+                if (_client == null || !_client.Connected)
+                    return false;
+                if (_stream == null || !_stream.CanWrite)
+                    return false;
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 

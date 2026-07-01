@@ -8,15 +8,49 @@ This project implements a reinforcement learning framework to train an AI agent 
 ```
 Dissertation/
 ├── CupheadPlugin/                     # C# plugin (game state extraction only)
-│   ├── Plugin.cs                      # Simplified BepInEx/Harmony plugin
+│   ├── Plugin.cs                      # Simplified BepInEx/Harmony plugin with TCP reconnection
 │   └── CupheadPlugin.csproj           # Project configuration
 ├── GameFiles/                         # Cuphead game installation
 ├── PythonRL/                          # Python RL components (main logic)
 │   ├── environment_server.py          # Main server: state reception + input control
-│   └── REQUIREMENTS.txt               # pynput dependency (>=1.7.6)
+│   ├── ppo_training.py                # PPO training loop with convergence tracking
+│   ├── live_display.py                # Live training dashboard
+│   ├── REQUIREMENTS.txt               # Dependencies (pynput>=1.7.6, gymnasium, stable-baselines3, torch)
+│   └── runs_data/                     # Training outputs (auto-created)
+│       ├── csv_logs/                  # Episode CSV logs (CUPHEAD_DATE_TIME_EPISODES.csv)
+│       └── training_logs/             # Training logs (CUPHEAD_DATE_TIME_EPISODES.log + RESTART_DEBUG_*.log)
 ├── PDD_Dalakoti_Milind_25230406.pdf   # Dissertation document
 ├── global.json                        # .NET configuration
 └── README.md                          # This file
+```
+
+## Build & Run Commands
+
+### Build C# Plugin
+```bash
+dotnet build CupheadPlugin/CupheadPlugin.csproj --configuration Debug --output CupheadPlugin/bin/Debug/net35
+cp CupheadPlugin/bin/Debug/net35/CupheadPlugin.dll GameFiles/BepInEx/plugins/CupheadPlugin/
+```
+**Note**: Always rebuild and copy DLL after any Plugin.cs changes. The plugin includes automatic TCP reconnection when the connection drops during level restarts.
+
+### Install Python Dependencies
+```bash
+cd PythonRL
+pip install -r REQUIREMENTS.txt
+# Requires: pynput>=1.7.6, numpy, gymnasium, stable-baselines3, torch
+```
+
+### Run Training
+```bash
+cd PythonRL
+python ppo_training.py    # Starts environment_server internally
+# Then launch Cuphead and navigate to Goopy Le Grande
+```
+
+### Run Standalone Server
+```bash
+cd PythonRL
+python environment_server.py    # For manual input testing
 ```
 
 ## Setup
@@ -88,6 +122,28 @@ Follow the prompts to test keyboard inputs.
 - When `set_health=true`, boss HP is set to phase-appropriate threshold for realistic training
 - Normal mode: BigSlime (76% HP), Tombstone (31% HP)
 
+✅ **TCP Auto-Reconnection (Plugin.cs)**: 
+- Automatic reconnection (5 retries, 1s delay) when TCP connection drops during scene transitions
+- Connection validity checking before each state send
+- Prevents training disruption during level restarts
+
+✅ **Robust Restart Handling (ppo_training.py)**: 
+- Fixed lock ordering deadlock that caused 8-hour training hangs
+- Extended restart timeout to 90s with connection monitoring
+- Defensive state clearing before/after episodes
+- Dedicated restart debug logger (RESTART_DEBUG_*.log)
+
+✅ **Convergence Tracking & Logging**: 
+- Win rate, avg damage, avg duration logged every 50 episodes
+- Episode outcome tracking for plateau detection
+- Heartbeat logging every 100 steps confirms training alive
+- CSV logs organized in runs_data/csv_logs/ with timestamp naming
+
+✅ **Socket Timeout Protection (environment_server.py)**:
+- 1s timeout on accept/recv allows clean thread shutdown
+- 5s timeout on command socket (restart/phase jump) prevents indefinite blocking
+- Periodic self.running checks enable graceful shutdown
+
 
 
 
@@ -140,3 +196,77 @@ server.auto_phase_set_health = True      # Also set HP to phase threshold when j
 - The C# plugin (`Plugin.cs`) is intentionally minimal - focused purely on reliable state extraction
 - All complex logic (state processing, decision making, input control) resides in Python
 ---
+
+## PPO Training Details
+
+### Observation Space (7 normalized dimensions)
+```python
+[
+    boss_x/500, boss_y/500,      # Boss position (-1 to 1)
+    boss_hp/1200, boss_hp_pct/100, # Boss HP (0 to 1)
+    player_x/500, player_y/500,  # Player position (-1 to 1)
+    player_is_dead                # Binary (0=alive, 1=dead)
+]
+```
+
+### Action Space (8 discrete)
+0. move_left, 1. move_right, 2. aim_up, 3. duck_crouch
+4. jump, 5. shoot, 6. dash, 7. directional_aim
+
+### Reward Function
+- `+100` for boss defeat (win)
+- `-10` for player death
+- `+0.5` per boss hit
+- `+0.01` per step (survival bonus)
+
+### Key Hyperparameters (Stable-Baselines3 PPO)
+- `learning_rate=3e-4` - Learning step size
+- `n_steps=2048` - Trajectory length before update
+- `batch_size=64` - Mini-batch size
+- `gamma=0.99` - Discount factor
+- `gae_lambda=0.95` - Advantage estimation
+- `clip_range=0.2` - PPO clipping (prevents large policy updates)
+
+### Convergence Detection
+Monitored every 50 episodes:
+- Win rate stability (plateaus with <10% variation)
+- Average damage per episode stabilization
+- Episodes between wins (consistently < 50 = learned)
+
+---
+
+## Data Outputs (runs_data/ folder)
+
+All training outputs are organized in:
+```
+PythonRL/runs_data/
+├── csv_logs/          # Episode data (named: CUPHEAD_DATE_TIME_TOTAL_EPISODES.csv)
+│   └── e.g., CUPHEAD_2026-06-30_14-30-45_10_episodes.csv
+└── training_logs/     # Training logs (named: CUPHEAD_DATE_TIME_TOTAL_EPISODES.log)
+    └── RESTART_DEBUG_*.log  # Dedicated restart debug logs
+```
+
+**File naming convention**: `CUPHEAD_DATE_TIME_TOTAL_EPISODES`
+- DATE: YYYY-MM-DD format
+- TIME: HH-MM-SS (24-hour)
+- TOTAL EPISODES: max_episodes parameter passed to training
+
+---
+
+## Critical Startup Sequence
+
+1. **Start Python server FIRST**: `python ppo_training.py` (waits for Cuphead)
+2. **THEN launch Cuphead from Steam**
+3. **Navigate to Goopy Le Grande (Slime) boss fight**
+4. **Training auto-starts when level_loaded event is received**
+
+### Known Limitation
+Unity games freeze when losing window focus. Workaround: use windowed mode or dual-monitor setup.
+
+---
+
+## Common Debug Locations
+
+- `cuphead_debug.log` in BepInEx root - plugin state/diagnostics
+- `runs_data/training_logs/` - training output logs
+- `runs_data/csv_logs/` - episode data (CSV format)

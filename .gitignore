@@ -80,3 +80,5 @@ _build/
 
 # OS
 Desktop.ini
+CLAUDE.md
+PythonRL/runs_data/csv_logs/CUPHEAD_2026-07-01_05-27-37_1000_episodes.csv
